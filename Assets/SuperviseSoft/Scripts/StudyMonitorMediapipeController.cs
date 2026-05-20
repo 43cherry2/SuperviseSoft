@@ -134,6 +134,7 @@ namespace SuperviseSoft.Mediapipe
     private HandLandmarkerResult _handResult;
     private ObjectDetectionResult _objectResult;
     private Coroutine _runCoroutine;
+    private Coroutine _cameraRestartCoroutine;
     private bool _isMediapipeInitialized;
     private int _currentCameraIndex;
     private bool _cameraSwitchPending;
@@ -224,6 +225,12 @@ namespace SuperviseSoft.Mediapipe
 
     private void OnDisable()
     {
+      if (_cameraRestartCoroutine != null)
+      {
+        StopCoroutine(_cameraRestartCoroutine);
+        _cameraRestartCoroutine = null;
+      }
+
       if (_runCoroutine != null)
       {
         StopCoroutine(_runCoroutine);
@@ -913,10 +920,50 @@ namespace SuperviseSoft.Mediapipe
 
       _currentCameraIndex = index;
       _pendingCameraIndex = index;
-      _cameraSwitchPending = true;
-      SetStatus("正在切换相机...");
+      _cameraSwitchPending = false;
+      SetStatus("正在切换相机并重启 GPU 检测...");
       UpdateCameraPickerLabel(devices);
       RefreshCameraPickerList(false);
+
+      if (_cameraRestartCoroutine != null)
+      {
+        StopCoroutine(_cameraRestartCoroutine);
+      }
+
+      _cameraRestartCoroutine = StartCoroutine(RestartDetectionWithCamera(index));
+    }
+
+    private IEnumerator RestartDetectionWithCamera(int index)
+    {
+      var devices = WebCamTexture.devices;
+      if (index < 0 || index >= devices.Length)
+      {
+        SetStatus("切换相机失败：相机列表已变化，请重新选择。");
+        RefreshCameraPickerList(false);
+        _cameraRestartCoroutine = null;
+        yield break;
+      }
+
+      _currentCameraIndex = index;
+      UpdateCameraPickerLabel(devices);
+      RefreshCameraPickerList(false);
+
+      if (_runCoroutine != null)
+      {
+        StopCoroutine(_runCoroutine);
+        _runCoroutine = null;
+      }
+
+      DisposeMediapipe();
+      StopCamera();
+      ClearRuntimeTrackingState();
+      SetStatus($"正在打开相机并重启 GPU：{BuildCameraOptionLabel(devices[index], index, false)}");
+
+      yield return null;
+      yield return null;
+
+      _runCoroutine = StartCoroutine(Run());
+      _cameraRestartCoroutine = null;
     }
 
     private IEnumerator SwitchCamera(int index)
@@ -1402,6 +1449,27 @@ namespace SuperviseSoft.Mediapipe
       _handLandmarker = null;
       _objectDetector?.Close();
       _objectDetector = null;
+    }
+
+    private void ClearRuntimeTrackingState()
+    {
+      _personInFrame = false;
+      _faceInFrame = false;
+      _poseInFrame = false;
+      _headDown = false;
+      _likelyReading = false;
+      _stablePosture = BodyPosture.Unknown;
+      _lastSeenTime = -999f;
+      _currentIdentity = "未知";
+      _postureBasis = "无";
+      _sceneObjectContext = "无";
+      _deskLikeObjectInFrame = false;
+      _seatLikeObjectInFrame = false;
+      _readingObjectInFrame = false;
+      _handLandmarkLists.Clear();
+      _landmarkOverlay?.Clear();
+      ResetUpperBodyBaseline();
+      ResetHeadPitchBaseline();
     }
 
     private void AnalyzeResults(bool poseDetected, bool faceDetected, bool handDetected)
