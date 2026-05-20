@@ -6,6 +6,9 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
+    path: Assets/Scenes/TestGPU.unity
+    guid: ebffe99230710e74b8b9d6c3ea5dd155
+  - enabled: 1
     path: Assets/Scenes/TestMediapipe.unity
     guid: 766f3321ff4ee5c458c96cea516e233e
   m_configObjects: {}
