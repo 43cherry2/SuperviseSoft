@@ -246,7 +246,7 @@ namespace SuperviseSoft.Mediapipe
       {
         var options = new FaceLandmarkerOptions(
           new BaseOptions(BaseOptions.Delegate.CPU, modelAssetBuffer: faceModel.bytes),
-          runningMode: RunningMode.IMAGE,
+          runningMode: global::Mediapipe.Tasks.Vision.Core.RunningMode.IMAGE,
           numFaces: 1,
           outputFaceBlendshapes: true,
           outputFaceTransformationMatrixes: true);
@@ -279,7 +279,7 @@ namespace SuperviseSoft.Mediapipe
       {
         var options = new FaceLandmarkerOptions(
           new BaseOptions(BaseOptions.Delegate.GPU, modelAssetBuffer: faceModel.bytes),
-          runningMode: RunningMode.IMAGE,
+          runningMode: global::Mediapipe.Tasks.Vision.Core.RunningMode.IMAGE,
           numFaces: 1,
           outputFaceBlendshapes: true,
           outputFaceTransformationMatrixes: true);
