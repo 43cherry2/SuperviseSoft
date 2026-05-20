@@ -6,6 +6,7 @@ using Mediapipe.Tasks.Vision.Core;
 using Mediapipe.Tasks.Vision.FaceLandmarker;
 using Mediapipe.Unity;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.Rendering;
 using UnityEngine.UI;
 
@@ -22,17 +23,32 @@ namespace SuperviseSoft.Mediapipe
 
     private Text _reportText;
     private RawImage _cameraPreview;
+    private RectTransform _rootRect;
+    private RectTransform _titleRect;
+    private RectTransform _buttonBarRect;
+    private RectTransform _reportPanelRect;
+    private RectTransform _previewPanelRect;
+    private AspectRatioFitter _previewAspect;
+    private GridLayoutGroup _buttonGrid;
     private WebCamTexture _webCamTexture;
     private Coroutine _cameraCoroutine;
     private string _lastAction = "等待操作";
     private string _lastResult = "尚未测试";
     private bool _isBusy;
+    private bool _lastPortraitLayout;
 
     private void Awake()
     {
       Application.targetFrameRate = 60;
       BuildUi();
+      ApplyResponsiveLayout(true);
       RefreshReport();
+    }
+
+    private void Update()
+    {
+      ApplyResponsiveLayout(false);
+      UpdateCameraPreviewTransform();
     }
 
     private void OnDisable()
@@ -63,6 +79,7 @@ namespace SuperviseSoft.Mediapipe
     {
       var canvasObject = new GameObject("GPU Diagnostics Canvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
       canvasObject.transform.SetParent(transform, false);
+      EnsureEventSystem();
 
       var canvas = canvasObject.GetComponent<Canvas>();
       canvas.renderMode = RenderMode.ScreenSpaceOverlay;
@@ -75,12 +92,19 @@ namespace SuperviseSoft.Mediapipe
       var font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
       var root = CreatePanel("Root", canvasObject.transform, new Color(0.045f, 0.055f, 0.065f, 1f));
       Stretch(root.rectTransform, Vector2.zero, Vector2.one, Vector2.zero, Vector2.zero);
+      _rootRect = root.rectTransform;
 
       var title = CreateText("Title", root.transform, font, "TestGPU - MediaPipe GPU 诊断", 28, TextAnchor.MiddleLeft, Color.white);
       Stretch(title.rectTransform, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(24f, -58f), new Vector2(-24f, -12f));
+      _titleRect = title.rectTransform;
 
       var buttonBar = CreatePanel("Button Bar", root.transform, new Color(0.10f, 0.12f, 0.14f, 1f));
       Stretch(buttonBar.rectTransform, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -112f), new Vector2(-20f, -64f));
+      _buttonBarRect = buttonBar.rectTransform;
+      _buttonGrid = buttonBar.gameObject.AddComponent<GridLayoutGroup>();
+      _buttonGrid.padding = new RectOffset(8, 8, 8, 8);
+      _buttonGrid.spacing = new Vector2(8f, 8f);
+      _buttonGrid.childAlignment = TextAnchor.UpperLeft;
 
       AddButton(buttonBar.transform, font, "刷新环境", 12f, () =>
       {
@@ -115,6 +139,7 @@ namespace SuperviseSoft.Mediapipe
 
       var reportPanel = CreatePanel("Report Panel", root.transform, new Color(0.075f, 0.085f, 0.095f, 1f));
       Stretch(reportPanel.rectTransform, new Vector2(0f, 0f), new Vector2(0.62f, 1f), new Vector2(20f, 20f), new Vector2(-10f, -124f));
+      _reportPanelRect = reportPanel.rectTransform;
 
       _reportText = CreateText("Report Text", reportPanel.transform, font, string.Empty, 18, TextAnchor.UpperLeft, new Color(0.9f, 0.94f, 0.96f));
       Stretch(_reportText.rectTransform, Vector2.zero, Vector2.one, new Vector2(16f, 14f), new Vector2(-16f, -14f));
@@ -123,11 +148,14 @@ namespace SuperviseSoft.Mediapipe
 
       var previewPanel = CreatePanel("Camera Preview Panel", root.transform, new Color(0.02f, 0.025f, 0.03f, 1f));
       Stretch(previewPanel.rectTransform, new Vector2(0.62f, 0f), Vector2.one, new Vector2(10f, 20f), new Vector2(-20f, -124f));
+      _previewPanelRect = previewPanel.rectTransform;
 
       _cameraPreview = new GameObject("Camera Preview", typeof(RectTransform), typeof(CanvasRenderer), typeof(RawImage)).GetComponent<RawImage>();
       _cameraPreview.transform.SetParent(previewPanel.transform, false);
       _cameraPreview.color = new Color(0.2f, 0.22f, 0.24f, 1f);
       Stretch(_cameraPreview.rectTransform, Vector2.zero, Vector2.one, Vector2.zero, Vector2.zero);
+      _previewAspect = _cameraPreview.gameObject.AddComponent<AspectRatioFitter>();
+      _previewAspect.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
     }
 
     private IEnumerator StartCameraPreview()
@@ -384,6 +412,82 @@ namespace SuperviseSoft.Mediapipe
       }
 
       return $"上次危险步骤“{started}”已完成。时间：{time}。";
+    }
+
+    private static void EnsureEventSystem()
+    {
+      if (FindObjectOfType<EventSystem>() != null)
+      {
+        return;
+      }
+
+      new GameObject("EventSystem", typeof(EventSystem), typeof(StandaloneInputModule));
+    }
+
+    private void ApplyResponsiveLayout(bool force)
+    {
+      if (_rootRect == null || _buttonGrid == null || _reportPanelRect == null || _previewPanelRect == null)
+      {
+        return;
+      }
+
+      var isPortrait = UnityEngine.Screen.height > UnityEngine.Screen.width;
+      if (!force && isPortrait == _lastPortraitLayout)
+      {
+        return;
+      }
+
+      _lastPortraitLayout = isPortrait;
+
+      if (isPortrait)
+      {
+        Stretch(_titleRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -62f), new Vector2(-20f, -10f));
+        Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -210f), new Vector2(-20f, -70f));
+        Stretch(_reportPanelRect, new Vector2(0f, 0.30f), new Vector2(1f, 1f), new Vector2(20f, 10f), new Vector2(-20f, -220f));
+        Stretch(_previewPanelRect, Vector2.zero, new Vector2(1f, 0.30f), new Vector2(20f, 20f), new Vector2(-20f, -10f));
+
+        var width = Mathf.Max(320f, _rootRect.rect.width);
+        var cellWidth = Mathf.Max(128f, (width - 56f) * 0.5f);
+        _buttonGrid.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
+        _buttonGrid.constraintCount = 2;
+        _buttonGrid.cellSize = new Vector2(cellWidth, 38f);
+      }
+      else
+      {
+        Stretch(_titleRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(24f, -58f), new Vector2(-24f, -12f));
+        Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -112f), new Vector2(-20f, -64f));
+        Stretch(_reportPanelRect, new Vector2(0f, 0f), new Vector2(0.62f, 1f), new Vector2(20f, 20f), new Vector2(-10f, -124f));
+        Stretch(_previewPanelRect, new Vector2(0.62f, 0f), Vector2.one, new Vector2(10f, 20f), new Vector2(-20f, -124f));
+
+        var width = Mathf.Max(760f, _rootRect.rect.width);
+        var cellWidth = Mathf.Max(118f, (width - 96f) / 6f);
+        _buttonGrid.constraint = GridLayoutGroup.Constraint.FixedRowCount;
+        _buttonGrid.constraintCount = 1;
+        _buttonGrid.cellSize = new Vector2(cellWidth, 38f);
+      }
+    }
+
+    private void UpdateCameraPreviewTransform()
+    {
+      if (_cameraPreview == null || _webCamTexture == null)
+      {
+        return;
+      }
+
+      var rect = _cameraPreview.rectTransform;
+      var rotation = _webCamTexture.videoRotationAngle;
+      rect.localEulerAngles = new Vector3(0f, 0f, -rotation);
+      _cameraPreview.uvRect = _webCamTexture.videoVerticallyMirrored
+        ? new Rect(0f, 1f, 1f, -1f)
+        : new Rect(0f, 0f, 1f, 1f);
+
+      if (_previewAspect != null && _webCamTexture.width > 16 && _webCamTexture.height > 16)
+      {
+        var rotated = rotation == 90 || rotation == 270;
+        _previewAspect.aspectRatio = rotated
+          ? (float)_webCamTexture.height / _webCamTexture.width
+          : (float)_webCamTexture.width / _webCamTexture.height;
+      }
     }
 
     private static Image CreatePanel(string name, Transform parent, Color color)
