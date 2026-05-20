@@ -36,19 +36,26 @@ namespace SuperviseSoft.Mediapipe
     private RectTransform _rootRect;
     private RectTransform _titleRect;
     private RectTransform _buttonBarRect;
+    private RectTransform _buttonContentRect;
     private RectTransform _reportPanelRect;
+    private RectTransform _reportViewportRect;
     private RectTransform _previewPanelRect;
     private AspectRatioFitter _previewAspect;
     private GridLayoutGroup _buttonGrid;
+    private ScrollRect _buttonScrollRect;
+    private ScrollRect _reportScrollRect;
     private WebCamTexture _webCamTexture;
     private Coroutine _cameraCoroutine;
     private int _selectedCameraIndex;
     private int _lastInferenceFrameId;
+    private int _transformScanStep;
+    private string _transformScanHistory = "尚未开始。";
     private string _lastAction = "等待操作";
     private string _lastResult = "尚未测试";
     private string _lastInferencePath = "尚未运行图像推理";
     private bool _isBusy;
     private bool _lastPortraitLayout;
+    private Vector2 _lastLayoutSize;
 
     private void Awake()
     {
@@ -106,19 +113,41 @@ namespace SuperviseSoft.Mediapipe
       var buttonBar = CreatePanel("Button Bar", root.transform, new Color(0.10f, 0.12f, 0.14f, 1f));
       Stretch(buttonBar.rectTransform, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -112f), new Vector2(-20f, -64f));
       _buttonBarRect = buttonBar.rectTransform;
-      _buttonGrid = buttonBar.gameObject.AddComponent<GridLayoutGroup>();
+      _buttonScrollRect = buttonBar.gameObject.AddComponent<ScrollRect>();
+      _buttonScrollRect.horizontal = false;
+      _buttonScrollRect.vertical = true;
+      _buttonScrollRect.movementType = ScrollRect.MovementType.Clamped;
+      _buttonScrollRect.scrollSensitivity = 24f;
+
+      var buttonViewport = CreateViewport("Button Viewport", buttonBar.transform);
+      Stretch(buttonViewport, Vector2.zero, Vector2.one, new Vector2(8f, 8f), new Vector2(-24f, -8f));
+      _buttonScrollRect.viewport = buttonViewport;
+      var buttonScrollbar = CreateScrollbar("Button Scrollbar", buttonBar.transform);
+      Stretch(buttonScrollbar.GetComponent<RectTransform>(), new Vector2(1f, 0f), Vector2.one, new Vector2(-18f, 8f), new Vector2(-8f, -8f));
+      _buttonScrollRect.verticalScrollbar = buttonScrollbar;
+      _buttonScrollRect.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
+
+      _buttonContentRect = new GameObject("Button Content", typeof(RectTransform)).GetComponent<RectTransform>();
+      _buttonContentRect.transform.SetParent(buttonViewport, false);
+      _buttonContentRect.anchorMin = new Vector2(0f, 1f);
+      _buttonContentRect.anchorMax = new Vector2(1f, 1f);
+      _buttonContentRect.pivot = new Vector2(0.5f, 1f);
+      _buttonContentRect.anchoredPosition = Vector2.zero;
+      _buttonScrollRect.content = _buttonContentRect;
+
+      _buttonGrid = _buttonContentRect.gameObject.AddComponent<GridLayoutGroup>();
       _buttonGrid.padding = new RectOffset(8, 8, 8, 8);
       _buttonGrid.spacing = new Vector2(8f, 8f);
       _buttonGrid.childAlignment = TextAnchor.UpperLeft;
 
-      AddButton(buttonBar.transform, font, "刷新环境", 12f, () =>
+      AddButton(_buttonContentRect.transform, font, "刷新环境", 12f, () =>
       {
         _lastAction = "刷新环境";
         _lastResult = "已刷新";
         RefreshReport();
       });
 
-      AddButton(buttonBar.transform, font, "相机预览", 176f, () =>
+      AddButton(_buttonContentRect.transform, font, "相机预览", 176f, () =>
       {
         if (_cameraCoroutine != null)
         {
@@ -128,7 +157,7 @@ namespace SuperviseSoft.Mediapipe
         _cameraCoroutine = StartCoroutine(StartCameraPreview());
       });
 
-      AddButton(buttonBar.transform, font, "切换相机", 340f, () =>
+      AddButton(_buttonContentRect.transform, font, "切换相机", 340f, () =>
       {
         if (_cameraCoroutine != null)
         {
@@ -138,16 +167,16 @@ namespace SuperviseSoft.Mediapipe
         _cameraCoroutine = StartCoroutine(SwitchCameraPreview());
       });
 
-      AddButton(buttonBar.transform, font, "CPU任务对照", 340f, () => RunAction("CPU FaceLandmarker 任务创建", TestCpuTaskCreation));
-      AddButton(buttonBar.transform, font, "危险: GPU初始化", 504f, () => StartCoroutine(RunGpuInitialize()));
-      AddButton(buttonBar.transform, font, "危险: GPU任务", 700f, () => RunAction("GPU FaceLandmarker 任务创建", TestGpuTaskCreation));
-      AddButton(buttonBar.transform, font, "CPU单帧推理", 880f, () => StartCoroutine(RunSingleFrameInference(BaseOptions.Delegate.CPU, false)));
-      AddButton(buttonBar.transform, font, "危险: GPU单帧", 1060f, () => StartCoroutine(RunSingleFrameInference(BaseOptions.Delegate.GPU, true)));
-      AddButton(buttonBar.transform, font, "CPU完整诊断", 1240f, () => StartCoroutine(RunFullPipelineInference(BaseOptions.Delegate.CPU, false, VisionRunningMode.IMAGE)));
-      AddButton(buttonBar.transform, font, "GPU完整诊断", 1420f, () => StartCoroutine(RunFullPipelineInference(BaseOptions.Delegate.GPU, true, VisionRunningMode.IMAGE)));
-      AddButton(buttonBar.transform, font, "GPU视频诊断", 1600f, () => StartCoroutine(RunFullPipelineInference(BaseOptions.Delegate.GPU, true, VisionRunningMode.VIDEO)));
-      AddButton(buttonBar.transform, font, "GPU变换扫描", 1780f, () => StartCoroutine(RunTransformScan(BaseOptions.Delegate.GPU, true)));
-      AddButton(buttonBar.transform, font, "清除崩溃记录", 880f, () =>
+      AddButton(_buttonContentRect.transform, font, "CPU任务对照", 340f, () => RunAction("CPU FaceLandmarker 任务创建", TestCpuTaskCreation));
+      AddButton(_buttonContentRect.transform, font, "危险: GPU初始化", 504f, () => StartCoroutine(RunGpuInitialize()));
+      AddButton(_buttonContentRect.transform, font, "危险: GPU任务", 700f, () => RunAction("GPU FaceLandmarker 任务创建", TestGpuTaskCreation));
+      AddButton(_buttonContentRect.transform, font, "CPU单帧推理", 880f, () => StartCoroutine(RunSingleFrameInference(BaseOptions.Delegate.CPU, false)));
+      AddButton(_buttonContentRect.transform, font, "危险: GPU单帧", 1060f, () => StartCoroutine(RunSingleFrameInference(BaseOptions.Delegate.GPU, true)));
+      AddButton(_buttonContentRect.transform, font, "CPU完整诊断", 1240f, () => StartCoroutine(RunFullPipelineInference(BaseOptions.Delegate.CPU, false, VisionRunningMode.IMAGE)));
+      AddButton(_buttonContentRect.transform, font, "GPU完整诊断", 1420f, () => StartCoroutine(RunFullPipelineInference(BaseOptions.Delegate.GPU, true, VisionRunningMode.IMAGE)));
+      AddButton(_buttonContentRect.transform, font, "GPU视频诊断", 1600f, () => StartCoroutine(RunFullPipelineInference(BaseOptions.Delegate.GPU, true, VisionRunningMode.VIDEO)));
+      AddButton(_buttonContentRect.transform, font, "GPU变换扫描", 1780f, () => StartCoroutine(RunTransformScan(BaseOptions.Delegate.GPU, true)));
+      AddButton(_buttonContentRect.transform, font, "清除崩溃记录", 880f, () =>
       {
         PlayerPrefs.DeleteKey(CrashStepKey);
         PlayerPrefs.DeleteKey(CompletedStepKey);
@@ -162,10 +191,29 @@ namespace SuperviseSoft.Mediapipe
       Stretch(reportPanel.rectTransform, new Vector2(0f, 0f), new Vector2(0.62f, 1f), new Vector2(20f, 20f), new Vector2(-10f, -124f));
       _reportPanelRect = reportPanel.rectTransform;
 
-      _reportText = CreateText("Report Text", reportPanel.transform, font, string.Empty, 18, TextAnchor.UpperLeft, new Color(0.9f, 0.94f, 0.96f));
-      Stretch(_reportText.rectTransform, Vector2.zero, Vector2.one, new Vector2(16f, 14f), new Vector2(-16f, -14f));
+      _reportScrollRect = reportPanel.gameObject.AddComponent<ScrollRect>();
+      _reportScrollRect.horizontal = false;
+      _reportScrollRect.vertical = true;
+      _reportScrollRect.movementType = ScrollRect.MovementType.Clamped;
+      _reportScrollRect.scrollSensitivity = 28f;
+
+      _reportViewportRect = CreateViewport("Report Viewport", reportPanel.transform);
+      Stretch(_reportViewportRect, Vector2.zero, Vector2.one, new Vector2(14f, 12f), new Vector2(-26f, -12f));
+      _reportScrollRect.viewport = _reportViewportRect;
+      var reportScrollbar = CreateScrollbar("Report Scrollbar", reportPanel.transform);
+      Stretch(reportScrollbar.GetComponent<RectTransform>(), new Vector2(1f, 0f), Vector2.one, new Vector2(-20f, 12f), new Vector2(-8f, -12f));
+      _reportScrollRect.verticalScrollbar = reportScrollbar;
+      _reportScrollRect.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
+
+      _reportText = CreateText("Report Text", _reportViewportRect.transform, font, string.Empty, 18, TextAnchor.UpperLeft, new Color(0.9f, 0.94f, 0.96f));
+      _reportText.rectTransform.anchorMin = new Vector2(0f, 1f);
+      _reportText.rectTransform.anchorMax = new Vector2(1f, 1f);
+      _reportText.rectTransform.pivot = new Vector2(0.5f, 1f);
+      _reportText.rectTransform.anchoredPosition = Vector2.zero;
+      _reportText.rectTransform.sizeDelta = new Vector2(0f, 1000f);
       _reportText.horizontalOverflow = HorizontalWrapMode.Wrap;
       _reportText.verticalOverflow = VerticalWrapMode.Overflow;
+      _reportScrollRect.content = _reportText.rectTransform;
 
       var previewPanel = CreatePanel("Camera Preview Panel", root.transform, new Color(0.02f, 0.025f, 0.03f, 1f));
       Stretch(previewPanel.rectTransform, new Vector2(0.62f, 0f), Vector2.one, new Vector2(10f, 20f), new Vector2(-20f, -124f));
@@ -478,6 +526,7 @@ namespace SuperviseSoft.Mediapipe
 
           var result = FaceLandmarkerResult.Alloc(1, true, true);
           var detected = task.TryDetect(inputImage, imageProcessingOptions, ref result);
+          inputImage.Dispose();
           _lastInferencePath = $"{delegateCase} delegate / {inputPath}";
           _lastResult = $"成功：{_lastInferencePath} 完成，检测到人脸={detected}。";
         }
@@ -497,6 +546,7 @@ namespace SuperviseSoft.Mediapipe
 
           var result = FaceLandmarkerResult.Alloc(1, true, true);
           var detected = task.TryDetect(inputImage, imageProcessingOptions, ref result);
+          inputImage.Dispose();
           _lastInferencePath = $"{delegateCase} delegate / {inputPath}";
           _lastResult = $"成功：{_lastInferencePath} 完成，检测到人脸={detected}。";
         }
@@ -660,7 +710,7 @@ namespace SuperviseSoft.Mediapipe
       _isBusy = true;
       var action = $"{delegateCase} 变换扫描";
       _lastAction = action;
-      _lastResult = "准备扫描相机旋转和镜像组合...";
+      _lastResult = "准备扫描下一组相机旋转和镜像组合...";
       MarkStepStarted(action);
       RefreshReport();
 
@@ -694,103 +744,68 @@ namespace SuperviseSoft.Mediapipe
 
         var gpuResources = delegateCase == BaseOptions.Delegate.GPU ? GpuManager.GpuResources : null;
         var taskCreation = new StringBuilder(256);
-        if (poseModel != null)
-        {
-          try
-          {
-            poseTask = PoseLandmarker.CreateFromOptions(
-              CreatePoseOptions(delegateCase, VisionRunningMode.IMAGE),
-              gpuResources);
-            taskCreation.AppendLine("Pose 任务：已创建");
-          }
-          catch (Exception exception)
-          {
-            taskCreation.AppendLine($"Pose 任务：创建异常 {exception.GetType().Name}: {exception.Message}");
-            Debug.LogException(exception);
-          }
-        }
-        else
-        {
-          taskCreation.AppendLine("Pose 任务：跳过，poseModel 未绑定");
-        }
-
-        if (faceModel != null)
-        {
-          try
-          {
-            faceTask = FaceLandmarker.CreateFromOptions(
-              CreateFaceOptions(delegateCase, VisionRunningMode.IMAGE),
-              gpuResources);
-            taskCreation.AppendLine("Face 任务：已创建");
-          }
-          catch (Exception exception)
-          {
-            taskCreation.AppendLine($"Face 任务：创建异常 {exception.GetType().Name}: {exception.Message}");
-            Debug.LogException(exception);
-          }
-        }
-        else
-        {
-          taskCreation.AppendLine("Face 任务：跳过，faceModel 未绑定");
-        }
+        CreateScanTasks(delegateCase, gpuResources, taskCreation, out poseTask, out faceTask);
 
         var useGpuTexture = delegateCase == BaseOptions.Delegate.GPU &&
                             allowGpuTextureInput &&
                             SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3;
-        framePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 40);
+        framePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 4);
         using var glContext = useGpuTexture ? GpuManager.GetGlContext() : null;
-
-        var builder = new StringBuilder(2200);
-        builder.AppendLine($"扫描链路：{delegateCase} delegate / {(useGpuTexture ? "GPU纹理输入" : "CPU相机帧输入")} / IMAGE");
-        builder.AppendLine(GetCameraSummary());
-        builder.AppendLine($"说明：每组只测 Face/Pose；如果某个 rotation/flip 能检测，主场景大概率是相机变换问题。");
-        builder.Append(taskCreation);
 
         var rotations = new[] { 0, 90, 180, 270 };
         var horizontalFlips = new[] { false, true };
+        var step = _transformScanStep % (rotations.Length * horizontalFlips.Length);
+        var rotation = rotations[step / horizontalFlips.Length];
+        var flipHorizontally = horizontalFlips[step % horizontalFlips.Length];
         var flipVertically = _webCamTexture.videoVerticallyMirrored;
         var timestamp = GetTimestampMillis();
 
-        foreach (var rotation in rotations)
+        if (step == 0)
         {
-          foreach (var flipHorizontally in horizontalFlips)
-          {
-            var options = new ImageProcessingOptions(rotationDegrees: rotation);
-            builder.AppendLine($"组合 rotation={rotation}, flipH={flipHorizontally}, flipV={flipVertically}");
-
-            if (faceTask != null)
-            {
-              yield return RunTaskOnCurrentFrame(
-                "  Face",
-                useGpuTexture,
-                framePool,
-                glContext,
-                options,
-                flipHorizontally,
-                flipVertically,
-                builder,
-                image => SummarizeFace(faceTask, image, options, VisionRunningMode.IMAGE, timestamp++));
-            }
-
-            if (poseTask != null)
-            {
-              yield return RunTaskOnCurrentFrame(
-                "  Pose",
-                useGpuTexture,
-                framePool,
-                glContext,
-                options,
-                flipHorizontally,
-                flipVertically,
-                builder,
-                image => SummarizePose(poseTask, image, options, VisionRunningMode.IMAGE, timestamp++));
-            }
-          }
+          _transformScanHistory = string.Empty;
         }
 
+        var builder = new StringBuilder(1200);
+        builder.AppendLine($"扫描链路：{delegateCase} delegate / {(useGpuTexture ? "GPU纹理输入" : "CPU相机帧输入")} / IMAGE");
+        builder.AppendLine(GetCameraSummary());
+        builder.AppendLine($"本次只跑 1 组，避免安卓主线程卡死。反复点“GPU变换扫描”会按 1/8 到 8/8 继续。");
+        builder.Append(taskCreation);
+        builder.AppendLine($"本次组合 {step + 1}/8：rotation={rotation}, flipH={flipHorizontally}, flipV={flipVertically}");
+
+        var options = new ImageProcessingOptions(rotationDegrees: rotation);
+        if (faceTask != null)
+        {
+          yield return RunTaskOnCurrentFrame(
+            "Face",
+            useGpuTexture,
+            framePool,
+            glContext,
+            options,
+            flipHorizontally,
+            flipVertically,
+            builder,
+            image => SummarizeFace(faceTask, image, options, VisionRunningMode.IMAGE, timestamp++));
+        }
+
+        if (poseTask != null)
+        {
+          yield return RunTaskOnCurrentFrame(
+            "Pose",
+            useGpuTexture,
+            framePool,
+            glContext,
+            options,
+            flipHorizontally,
+            flipVertically,
+            builder,
+            image => SummarizePose(poseTask, image, options, VisionRunningMode.IMAGE, timestamp++));
+        }
+
+        _transformScanHistory += builder + "\n";
+        _transformScanStep = (step + 1) % (rotations.Length * horizontalFlips.Length);
         _lastInferenceFrameId++;
         _lastInferencePath = $"{delegateCase} 变换扫描 / {(useGpuTexture ? "GPU纹理输入" : "CPU相机帧输入")} / frame#{_lastInferenceFrameId}";
-        _lastResult = builder.ToString();
+        _lastResult = _transformScanHistory;
       }
       finally
       {
@@ -800,6 +815,57 @@ namespace SuperviseSoft.Mediapipe
         MarkStepCompleted(action);
         _isBusy = false;
         RefreshReport();
+      }
+    }
+
+    private void CreateScanTasks(
+      BaseOptions.Delegate delegateCase,
+      global::Mediapipe.GpuResources gpuResources,
+      StringBuilder builder,
+      out PoseLandmarker poseTask,
+      out FaceLandmarker faceTask)
+    {
+      poseTask = null;
+      faceTask = null;
+
+      if (faceModel == null)
+      {
+        builder.AppendLine("Face 任务：跳过，faceModel 未绑定");
+      }
+      else
+      {
+        try
+        {
+          faceTask = FaceLandmarker.CreateFromOptions(
+            CreateFaceOptions(delegateCase, VisionRunningMode.IMAGE),
+            gpuResources);
+          builder.AppendLine("Face 任务：已创建");
+        }
+        catch (Exception exception)
+        {
+          builder.AppendLine($"Face 任务：创建异常 {exception.GetType().Name}: {exception.Message}");
+          Debug.LogException(exception);
+        }
+      }
+
+      if (poseModel == null)
+      {
+        builder.AppendLine("Pose 任务：跳过，poseModel 未绑定");
+      }
+      else
+      {
+        try
+        {
+          poseTask = PoseLandmarker.CreateFromOptions(
+            CreatePoseOptions(delegateCase, VisionRunningMode.IMAGE),
+            gpuResources);
+          builder.AppendLine("Pose 任务：已创建");
+        }
+        catch (Exception exception)
+        {
+          builder.AppendLine($"Pose 任务：创建异常 {exception.GetType().Name}: {exception.Message}");
+          Debug.LogException(exception);
+        }
       }
     }
 
@@ -987,6 +1053,10 @@ namespace SuperviseSoft.Mediapipe
       {
         builder.AppendLine($"{label}: 推理异常 {exception.GetType().Name}: {exception.Message}");
         Debug.LogException(exception);
+      }
+      finally
+      {
+        inputImage?.Dispose();
       }
     }
 
@@ -1211,8 +1281,30 @@ namespace SuperviseSoft.Mediapipe
       builder.AppendLine("6. 最关键：点“CPU单帧推理”和“危险: GPU单帧”，看是否能真实跑过相机图像。");
       builder.AppendLine("7. 切到前置相机后，依次点“CPU完整诊断”“GPU完整诊断”“GPU视频诊断”。如果 CPU 有人/脸而 GPU 没有，就是 GPU 链路问题；如果两者都没有，优先看相机旋转/镜像。");
       builder.AppendLine("8. 如果前置相机无检测，点“GPU变换扫描”，看哪组 rotation/flip 能检测到。");
+      builder.AppendLine("9. 这个场景先看文字里的 detected/人脸/人数/点数，不绘制骨架；确认链路后再回主场景接回骨架显示。");
 
       _reportText.text = builder.ToString();
+      UpdateReportTextHeight(true);
+    }
+
+    private void UpdateReportTextHeight(bool resetToTop)
+    {
+      if (_reportText == null || _reportViewportRect == null)
+      {
+        return;
+      }
+
+      var width = Mathf.Max(160f, _reportViewportRect.rect.width);
+      var settings = _reportText.GetGenerationSettings(new Vector2(width, 0f));
+      var preferredHeight = _reportText.cachedTextGeneratorForLayout.GetPreferredHeight(_reportText.text, settings) / _reportText.pixelsPerUnit;
+      var height = Mathf.Max(_reportViewportRect.rect.height + 1f, preferredHeight + 24f);
+      _reportText.rectTransform.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, height);
+
+      if (resetToTop && _reportScrollRect != null)
+      {
+        Canvas.ForceUpdateCanvases();
+        _reportScrollRect.verticalNormalizedPosition = 1f;
+      }
     }
 
     private static string FormatModelBinding(TextAsset model)
@@ -1277,7 +1369,7 @@ namespace SuperviseSoft.Mediapipe
 
     private void ApplyResponsiveLayout(bool force)
     {
-      if (_rootRect == null || _buttonGrid == null || _reportPanelRect == null || _previewPanelRect == null)
+      if (_rootRect == null || _buttonGrid == null || _buttonContentRect == null || _reportPanelRect == null || _previewPanelRect == null)
       {
         return;
       }
@@ -1287,25 +1379,22 @@ namespace SuperviseSoft.Mediapipe
       var isPortrait = devicePortrait ||
                        UnityEngine.Screen.height > UnityEngine.Screen.width ||
                        _rootRect.rect.height > _rootRect.rect.width;
-      if (!force && isPortrait == _lastPortraitLayout)
+      var layoutSize = _rootRect.rect.size;
+      if (!force && isPortrait == _lastPortraitLayout && (layoutSize - _lastLayoutSize).sqrMagnitude < 1f)
       {
         return;
       }
 
       _lastPortraitLayout = isPortrait;
+      _lastLayoutSize = layoutSize;
 
       if (isPortrait)
       {
         Stretch(_titleRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -62f), new Vector2(-20f, -10f));
-        Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -356f), new Vector2(-20f, -70f));
-        Stretch(_reportPanelRect, new Vector2(0f, 0.28f), new Vector2(1f, 1f), new Vector2(20f, 10f), new Vector2(-20f, -366f));
-        Stretch(_previewPanelRect, Vector2.zero, new Vector2(1f, 0.28f), new Vector2(20f, 18f), new Vector2(-20f, -10f));
-
-        var width = Mathf.Max(320f, _rootRect.rect.width);
-        var cellWidth = Mathf.Max(128f, (width - 56f) * 0.5f);
-        _buttonGrid.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
-        _buttonGrid.constraintCount = 2;
-        _buttonGrid.cellSize = new Vector2(cellWidth, 38f);
+        Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -218f), new Vector2(-20f, -70f));
+        Stretch(_reportPanelRect, new Vector2(0f, 0.31f), new Vector2(1f, 1f), new Vector2(20f, 10f), new Vector2(-20f, -228f));
+        Stretch(_previewPanelRect, Vector2.zero, new Vector2(1f, 0.31f), new Vector2(20f, 18f), new Vector2(-20f, -10f));
+        ConfigureButtonGrid(2);
       }
       else
       {
@@ -1313,12 +1402,39 @@ namespace SuperviseSoft.Mediapipe
         Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -154f), new Vector2(-20f, -64f));
         Stretch(_reportPanelRect, new Vector2(0f, 0f), new Vector2(0.62f, 1f), new Vector2(20f, 20f), new Vector2(-10f, -166f));
         Stretch(_previewPanelRect, new Vector2(0.62f, 0f), Vector2.one, new Vector2(10f, 20f), new Vector2(-20f, -166f));
+        ConfigureButtonGrid(4);
+      }
 
-        var width = Mathf.Max(760f, _rootRect.rect.width);
-        var cellWidth = Mathf.Max(112f, (width - 96f) / 6f);
-        _buttonGrid.constraint = GridLayoutGroup.Constraint.FixedRowCount;
-        _buttonGrid.constraintCount = 2;
-        _buttonGrid.cellSize = new Vector2(cellWidth, 38f);
+      UpdateReportTextHeight(false);
+    }
+
+    private void ConfigureButtonGrid(int columnCount)
+    {
+      var width = Mathf.Max(280f, _buttonBarRect.rect.width - 32f);
+      var cellWidth = Mathf.Max(
+        108f,
+        (width - _buttonGrid.padding.horizontal - _buttonGrid.spacing.x * (columnCount - 1)) / columnCount);
+      var cellHeight = 38f;
+      var childCount = Mathf.Max(1, _buttonContentRect.childCount);
+      var rowCount = Mathf.CeilToInt(childCount / (float)columnCount);
+      var contentHeight = _buttonGrid.padding.vertical +
+                          rowCount * cellHeight +
+                          Mathf.Max(0, rowCount - 1) * _buttonGrid.spacing.y;
+      var viewportHeight = Mathf.Max(40f, _buttonBarRect.rect.height - 16f);
+
+      _buttonGrid.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
+      _buttonGrid.constraintCount = columnCount;
+      _buttonGrid.cellSize = new Vector2(cellWidth, cellHeight);
+
+      _buttonContentRect.anchorMin = new Vector2(0f, 1f);
+      _buttonContentRect.anchorMax = new Vector2(1f, 1f);
+      _buttonContentRect.pivot = new Vector2(0.5f, 1f);
+      _buttonContentRect.sizeDelta = new Vector2(0f, Mathf.Max(viewportHeight + 1f, contentHeight));
+
+      if (_buttonScrollRect != null)
+      {
+        _buttonScrollRect.horizontal = false;
+        _buttonScrollRect.vertical = true;
       }
     }
 
@@ -1343,6 +1459,34 @@ namespace SuperviseSoft.Mediapipe
           ? (float)_webCamTexture.height / _webCamTexture.width
           : (float)_webCamTexture.width / _webCamTexture.height;
       }
+    }
+
+    private static RectTransform CreateViewport(string name, Transform parent)
+    {
+      var rect = new GameObject(name, typeof(RectTransform), typeof(RectMask2D)).GetComponent<RectTransform>();
+      rect.transform.SetParent(parent, false);
+      return rect;
+    }
+
+    private static Scrollbar CreateScrollbar(string name, Transform parent)
+    {
+      var scrollbar = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(Scrollbar)).GetComponent<Scrollbar>();
+      scrollbar.transform.SetParent(parent, false);
+      scrollbar.GetComponent<Image>().color = new Color(0.08f, 0.095f, 0.11f, 0.9f);
+      scrollbar.direction = Scrollbar.Direction.BottomToTop;
+
+      var slidingArea = new GameObject("Sliding Area", typeof(RectTransform)).GetComponent<RectTransform>();
+      slidingArea.SetParent(scrollbar.transform, false);
+      Stretch(slidingArea, Vector2.zero, Vector2.one, new Vector2(1f, 1f), new Vector2(-1f, -1f));
+
+      var handle = new GameObject("Handle", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image)).GetComponent<Image>();
+      handle.transform.SetParent(slidingArea, false);
+      handle.color = new Color(0.42f, 0.52f, 0.62f, 1f);
+      Stretch(handle.rectTransform, Vector2.zero, Vector2.one, Vector2.zero, Vector2.zero);
+
+      scrollbar.handleRect = handle.rectTransform;
+      scrollbar.targetGraphic = handle;
+      return scrollbar;
     }
 
     private static Image CreatePanel(string name, Transform parent, Color color)
