@@ -5,6 +5,7 @@ using Mediapipe.Tasks.Core;
 using Mediapipe.Tasks.Vision.Core;
 using Mediapipe.Tasks.Vision.FaceLandmarker;
 using Mediapipe.Unity;
+using Mediapipe.Unity.Experimental;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.Rendering;
@@ -34,6 +35,7 @@ namespace SuperviseSoft.Mediapipe
     private Coroutine _cameraCoroutine;
     private string _lastAction = "等待操作";
     private string _lastResult = "尚未测试";
+    private string _lastInferencePath = "尚未运行图像推理";
     private bool _isBusy;
     private bool _lastPortraitLayout;
 
@@ -126,6 +128,8 @@ namespace SuperviseSoft.Mediapipe
       AddButton(buttonBar.transform, font, "CPU任务对照", 340f, () => RunAction("CPU FaceLandmarker 任务创建", TestCpuTaskCreation));
       AddButton(buttonBar.transform, font, "危险: GPU初始化", 504f, () => StartCoroutine(RunGpuInitialize()));
       AddButton(buttonBar.transform, font, "危险: GPU任务", 700f, () => RunAction("GPU FaceLandmarker 任务创建", TestGpuTaskCreation));
+      AddButton(buttonBar.transform, font, "CPU单帧推理", 880f, () => StartCoroutine(RunSingleFrameInference(BaseOptions.Delegate.CPU, false)));
+      AddButton(buttonBar.transform, font, "危险: GPU单帧", 1060f, () => StartCoroutine(RunSingleFrameInference(BaseOptions.Delegate.GPU, true)));
       AddButton(buttonBar.transform, font, "清除崩溃记录", 880f, () =>
       {
         PlayerPrefs.DeleteKey(CrashStepKey);
@@ -169,6 +173,18 @@ namespace SuperviseSoft.Mediapipe
       _lastAction = "启动相机预览";
       _lastResult = "正在启动...";
       RefreshReport();
+      yield return EnsureCameraPreviewRunning();
+      _isBusy = false;
+      RefreshReport();
+    }
+
+    private IEnumerator EnsureCameraPreviewRunning()
+    {
+      if (_webCamTexture != null && _webCamTexture.isPlaying && _webCamTexture.width > 16)
+      {
+        _lastResult = $"相机已就绪：{_webCamTexture.width}x{_webCamTexture.height}，旋转={_webCamTexture.videoRotationAngle}，竖向镜像={_webCamTexture.videoVerticallyMirrored}";
+        yield break;
+      }
 
       if (_webCamTexture != null)
       {
@@ -184,8 +200,6 @@ namespace SuperviseSoft.Mediapipe
       if (devices.Length == 0)
       {
         _lastResult = "未找到相机";
-        _isBusy = false;
-        RefreshReport();
         yield break;
       }
 
@@ -195,16 +209,17 @@ namespace SuperviseSoft.Mediapipe
       _cameraPreview.texture = _webCamTexture;
 
       var start = Time.realtimeSinceStartup;
-      while (_webCamTexture.width <= 16 && Time.realtimeSinceStartup - start < 5f)
+      while (_webCamTexture != null &&
+             _webCamTexture.width <= 16 &&
+             Time.realtimeSinceStartup - start < 5f)
       {
         yield return null;
       }
 
-      _lastResult = _webCamTexture.width > 16
+      _lastResult = _webCamTexture != null && _webCamTexture.width > 16
         ? $"相机已启动：{device.name}，{_webCamTexture.width}x{_webCamTexture.height}，旋转={_webCamTexture.videoRotationAngle}，竖向镜像={_webCamTexture.videoVerticallyMirrored}"
         : "相机启动超时，可能是权限或设备占用";
-      _isBusy = false;
-      RefreshReport();
+      UpdateCameraPreviewTransform();
     }
 
     private IEnumerator RunGpuInitialize()
@@ -321,6 +336,151 @@ namespace SuperviseSoft.Mediapipe
       }
     }
 
+    private IEnumerator RunSingleFrameInference(BaseOptions.Delegate delegateCase, bool allowGpuTextureInput)
+    {
+      if (_isBusy)
+      {
+        yield break;
+      }
+
+      _isBusy = true;
+      var action = delegateCase == BaseOptions.Delegate.GPU
+        ? "GPU FaceLandmarker 单帧推理"
+        : "CPU FaceLandmarker 单帧推理";
+      _lastAction = action;
+      _lastResult = "准备相机帧和模型...";
+      MarkStepStarted(action);
+      RefreshReport();
+
+      FaceLandmarker task = null;
+      TextureFramePool framePool = null;
+
+      try
+      {
+        if (faceModel == null)
+        {
+          _lastResult = "失败：faceModel 未绑定。";
+          yield break;
+        }
+
+        yield return EnsureCameraPreviewRunning();
+        if (_webCamTexture == null || !_webCamTexture.isPlaying || _webCamTexture.width <= 16)
+        {
+          _lastResult = "失败：相机没有可用画面，无法做单帧推理。";
+          yield break;
+        }
+
+        if (delegateCase == BaseOptions.Delegate.GPU &&
+            (!GpuManager.IsInitialized || GpuManager.GpuResources == null))
+        {
+          _lastResult = "正在初始化 GPU...";
+          RefreshReport();
+          yield return GpuManager.Initialize();
+        }
+
+        if (delegateCase == BaseOptions.Delegate.GPU &&
+            (!GpuManager.IsInitialized || GpuManager.GpuResources == null))
+        {
+          _lastResult = "失败：GpuManager 初始化后仍不可用。";
+          yield break;
+        }
+
+        var options = new FaceLandmarkerOptions(
+          new BaseOptions(delegateCase, modelAssetBuffer: faceModel.bytes),
+          runningMode: global::Mediapipe.Tasks.Vision.Core.RunningMode.IMAGE,
+          numFaces: 1,
+          outputFaceBlendshapes: true,
+          outputFaceTransformationMatrixes: true);
+
+        task = FaceLandmarker.CreateFromOptions(
+          options,
+          delegateCase == BaseOptions.Delegate.GPU ? GpuManager.GpuResources : null);
+
+        framePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 2);
+        if (!framePool.TryGetTextureFrame(out var textureFrame))
+        {
+          _lastResult = "失败：TextureFramePool 暂时没有空闲帧。";
+          yield break;
+        }
+
+        var imageProcessingOptions = CreateImageProcessingOptions(out var flipHorizontally, out var flipVertically);
+        var useGpuTexture = delegateCase == BaseOptions.Delegate.GPU &&
+                            allowGpuTextureInput &&
+                            SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3;
+        var inputPath = useGpuTexture ? "GPU纹理输入" : "CPU相机帧输入";
+
+        if (useGpuTexture)
+        {
+          using var glContext = GpuManager.GetGlContext();
+          textureFrame.ReadTextureOnGPU(_webCamTexture, flipHorizontally, flipVertically);
+          var inputImage = textureFrame.BuildGPUImage(glContext);
+          yield return new WaitForEndOfFrame();
+
+          var result = FaceLandmarkerResult.Alloc(1, true, true);
+          var detected = task.TryDetect(inputImage, imageProcessingOptions, ref result);
+          _lastInferencePath = $"{delegateCase} delegate / {inputPath}";
+          _lastResult = $"成功：{_lastInferencePath} 完成，检测到人脸={detected}。";
+        }
+        else
+        {
+          var request = textureFrame.ReadTextureAsync(_webCamTexture, flipHorizontally, flipVertically);
+          yield return new WaitUntil(() => request.done);
+          if (request.hasError)
+          {
+            textureFrame.Release();
+            _lastResult = "失败：读取相机帧到 CPU 失败。";
+            yield break;
+          }
+
+          var inputImage = textureFrame.BuildCPUImage();
+          textureFrame.Release();
+
+          var result = FaceLandmarkerResult.Alloc(1, true, true);
+          var detected = task.TryDetect(inputImage, imageProcessingOptions, ref result);
+          _lastInferencePath = $"{delegateCase} delegate / {inputPath}";
+          _lastResult = $"成功：{_lastInferencePath} 完成，检测到人脸={detected}。";
+        }
+      }
+      finally
+      {
+        task?.Close();
+        framePool?.Dispose();
+        MarkStepCompleted(action);
+        _isBusy = false;
+        RefreshReport();
+      }
+    }
+
+    private ImageProcessingOptions CreateImageProcessingOptions(out bool flipHorizontally, out bool flipVertically)
+    {
+      var rotation = (global::Mediapipe.Unity.RotationAngle)NormalizeRotationDegrees(_webCamTexture.videoRotationAngle);
+      var transformationOptions = ImageTransformationOptions.Build(
+        false,
+        _webCamTexture.videoVerticallyMirrored,
+        rotation);
+
+      flipHorizontally = transformationOptions.flipHorizontally;
+      flipVertically = transformationOptions.flipVertically;
+      return new ImageProcessingOptions(rotationDegrees: (int)transformationOptions.rotationAngle);
+    }
+
+    private static int NormalizeRotationDegrees(int degrees)
+    {
+      var normalized = degrees % 360;
+      if (normalized < 0)
+      {
+        normalized += 360;
+      }
+
+      return normalized switch
+      {
+        >= 315 or < 45 => 0,
+        >= 45 and < 135 => 90,
+        >= 135 and < 225 => 180,
+        _ => 270
+      };
+    }
+
     private void RefreshReport()
     {
       if (_reportText == null)
@@ -349,6 +509,7 @@ namespace SuperviseSoft.Mediapipe
       builder.AppendLine($"GpuManager.IsInitialized：{GpuManager.IsInitialized}");
       builder.AppendLine($"GpuResources：{(GpuManager.GpuResources == null ? "null" : "ready")}");
       builder.AppendLine($"Face 模型绑定：{(faceModel == null ? "否" : $"{faceModel.name} ({faceModel.bytes.Length / 1024 / 1024} MB)")}");
+      builder.AppendLine($"上次图像推理路径：{_lastInferencePath}");
       builder.AppendLine();
       builder.AppendLine("【上次危险步骤记录】");
       builder.AppendLine(GetCrashMarkerSummary());
@@ -363,6 +524,7 @@ namespace SuperviseSoft.Mediapipe
       builder.AppendLine("3. 点“CPU任务对照”，确认模型和 MediaPipe CPU 正常。");
       builder.AppendLine("4. 只在需要定位崩溃时点“危险: GPU初始化”。如果闪退，回来后看“上次危险步骤记录”。");
       builder.AppendLine("5. GPU 初始化成功后，再点“危险: GPU任务”。");
+      builder.AppendLine("6. 最关键：点“CPU单帧推理”和“危险: GPU单帧”，看是否能真实跑过相机图像。");
 
       _reportText.text = builder.ToString();
     }
@@ -442,9 +604,9 @@ namespace SuperviseSoft.Mediapipe
       if (isPortrait)
       {
         Stretch(_titleRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -62f), new Vector2(-20f, -10f));
-        Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -210f), new Vector2(-20f, -70f));
-        Stretch(_reportPanelRect, new Vector2(0f, 0.30f), new Vector2(1f, 1f), new Vector2(20f, 10f), new Vector2(-20f, -220f));
-        Stretch(_previewPanelRect, Vector2.zero, new Vector2(1f, 0.30f), new Vector2(20f, 20f), new Vector2(-20f, -10f));
+        Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -274f), new Vector2(-20f, -70f));
+        Stretch(_reportPanelRect, new Vector2(0f, 0.28f), new Vector2(1f, 1f), new Vector2(20f, 10f), new Vector2(-20f, -284f));
+        Stretch(_previewPanelRect, Vector2.zero, new Vector2(1f, 0.28f), new Vector2(20f, 20f), new Vector2(-20f, -10f));
 
         var width = Mathf.Max(320f, _rootRect.rect.width);
         var cellWidth = Mathf.Max(128f, (width - 56f) * 0.5f);
@@ -460,7 +622,7 @@ namespace SuperviseSoft.Mediapipe
         Stretch(_previewPanelRect, new Vector2(0.62f, 0f), Vector2.one, new Vector2(10f, 20f), new Vector2(-20f, -124f));
 
         var width = Mathf.Max(760f, _rootRect.rect.width);
-        var cellWidth = Mathf.Max(118f, (width - 96f) / 6f);
+        var cellWidth = Mathf.Max(112f, (width - 96f) / 8f);
         _buttonGrid.constraint = GridLayoutGroup.Constraint.FixedRowCount;
         _buttonGrid.constraintCount = 1;
         _buttonGrid.cellSize = new Vector2(cellWidth, 38f);
