@@ -296,153 +296,168 @@ namespace SuperviseSoft.Mediapipe
 
       var waitForEndOfFrame = new WaitForEndOfFrame();
       var useGpuImageInput = CanUseGpuTextureInput();
-      using var glContext = useGpuImageInput ? global::Mediapipe.Unity.GpuManager.GetGlContext() : null;
+      var glContext = useGpuImageInput ? global::Mediapipe.Unity.GpuManager.GetGlContext() : null;
 
-      while (enabled)
+      try
       {
-        if (_cameraSwitchPending)
+        while (enabled)
         {
-          yield return SwitchCamera(_pendingCameraIndex);
-        }
-
-        if (_webCamTexture.width <= 16)
-        {
-          yield return null;
-          continue;
-        }
-
-        if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
-        {
-          yield return waitForEndOfFrame;
-          continue;
-        }
-
-        var imageProcessingOptions = CreateImageProcessingOptions(out var flipHorizontally, out var flipVertically);
-        if (useGpuImageInput)
-        {
-          Exception gpuException = null;
-          global::Mediapipe.Image inputImage = null;
-          try
+          if (_cameraSwitchPending)
           {
-            textureFrame.ReadTextureOnGPU(_webCamTexture, flipHorizontally, flipVertically);
-            inputImage = textureFrame.BuildGPUImage(glContext);
-          }
-          catch (Exception exception)
-          {
-            gpuException = exception;
+            yield return SwitchCamera(_pendingCameraIndex);
+            if (useGpuImageInput)
+            {
+              glContext?.Dispose();
+              glContext = global::Mediapipe.Unity.GpuManager.GetGlContext();
+              _inferenceStatusDetail = $"GPU 任务运行中，图像输入：GPU纹理输入，已随相机切换重建";
+            }
+
+            UpdateStatusUi();
           }
 
-          if (gpuException != null)
+          if (_webCamTexture.width <= 16)
           {
-            Debug.LogWarning($"[StudyMonitor] GPU texture input failed and will retry on GPU: {gpuException.Message}");
-            _inferenceStatusDetail = $"GPU 任务运行中，GPU纹理输入本帧失败，继续重试 GPU：{gpuException.Message}";
-            textureFrame.Release();
+            yield return null;
+            continue;
+          }
+
+          if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
+          {
+            yield return waitForEndOfFrame;
+            continue;
+          }
+
+          var imageProcessingOptions = CreateImageProcessingOptions(out var flipHorizontally, out var flipVertically);
+          if (useGpuImageInput)
+          {
+            Exception gpuException = null;
+            global::Mediapipe.Image inputImage = null;
+            try
+            {
+              textureFrame.ReadTextureOnGPU(_webCamTexture, flipHorizontally, flipVertically);
+              inputImage = textureFrame.BuildGPUImage(glContext);
+            }
+            catch (Exception exception)
+            {
+              gpuException = exception;
+            }
+
+            if (gpuException != null)
+            {
+              Debug.LogWarning($"[StudyMonitor] GPU texture input failed and will retry on GPU: {gpuException.Message}");
+              _inferenceStatusDetail = $"GPU 任务运行中，GPU纹理输入本帧失败，继续重试 GPU：{gpuException.Message}";
+              textureFrame.Release();
+              yield return WaitForNextDetection();
+              continue;
+            }
+
+            yield return waitForEndOfFrame;
+
+            try
+            {
+              var timestampMillisGpu = GetTimestampMillis();
+              var poseDetectedGpu = _poseLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _poseResult);
+              var faceDetectedGpu = _faceLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _faceResult);
+
+              var handDetectedGpu = false;
+              if (_handLandmarker != null)
+              {
+                handDetectedGpu = _handLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _handResult);
+              }
+
+              if (ShouldRunObjectDetection())
+              {
+                try
+                {
+                  var objectDetected = _objectDetector.TryDetectForVideo(
+                    inputImage,
+                    timestampMillisGpu,
+                    imageProcessingOptions,
+                    ref _objectResult);
+                  UpdateSceneObjectContext(objectDetected ? _objectResult : default);
+                }
+                catch (Exception exception)
+                {
+                  Debug.LogWarning($"[StudyMonitor] Object detection failed and was disabled: {exception.Message}");
+                  _objectDetector?.Close();
+                  _objectDetector = null;
+                  ResetSceneObjectContext();
+                }
+              }
+
+              AnalyzeResults(poseDetectedGpu, faceDetectedGpu, handDetectedGpu);
+              UpdateStatusUi();
+              DebugPoseEveryInterval();
+            }
+            catch (Exception exception)
+            {
+              Debug.LogWarning($"[StudyMonitor] GPU inference failed and will retry on GPU: {exception.Message}");
+              _inferenceStatusDetail = $"GPU 任务运行中，GPU推理本帧失败，继续重试 GPU：{exception.Message}";
+              textureFrame.Release();
+            }
+
             yield return WaitForNextDetection();
             continue;
           }
 
-          yield return waitForEndOfFrame;
+          var request = textureFrame.ReadTextureAsync(_webCamTexture, flipHorizontally, flipVertically);
+          yield return new WaitUntil(() => request.done);
 
-          try
+          if (request.hasError)
           {
-            var timestampMillisGpu = GetTimestampMillis();
-            var poseDetectedGpu = _poseLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _poseResult);
-            var faceDetectedGpu = _faceLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _faceResult);
-
-            var handDetectedGpu = false;
-            if (_handLandmarker != null)
-            {
-              handDetectedGpu = _handLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _handResult);
-            }
-
-            if (ShouldRunObjectDetection())
-            {
-              try
-              {
-                var objectDetected = _objectDetector.TryDetectForVideo(
-                  inputImage,
-                  timestampMillisGpu,
-                  imageProcessingOptions,
-                  ref _objectResult);
-                UpdateSceneObjectContext(objectDetected ? _objectResult : default);
-              }
-              catch (Exception exception)
-              {
-                Debug.LogWarning($"[StudyMonitor] Object detection failed and was disabled: {exception.Message}");
-                _objectDetector?.Close();
-                _objectDetector = null;
-                ResetSceneObjectContext();
-              }
-            }
-
-            AnalyzeResults(poseDetectedGpu, faceDetectedGpu, handDetectedGpu);
-            UpdateStatusUi();
-            DebugPoseEveryInterval();
-          }
-          catch (Exception exception)
-          {
-            Debug.LogWarning($"[StudyMonitor] GPU inference failed and will retry on GPU: {exception.Message}");
-            _inferenceStatusDetail = $"GPU 任务运行中，GPU推理本帧失败，继续重试 GPU：{exception.Message}";
             textureFrame.Release();
+            Debug.LogWarning("[StudyMonitor] 摄像头画面读取失败，跳过本帧。");
+            yield return WaitForNextDetection();
+            continue;
           }
 
-          yield return WaitForNextDetection();
-          continue;
-        }
+          var timestampMillis = GetTimestampMillis();
+          var poseImage = textureFrame.BuildCPUImage();
+          var poseDetected = _poseLandmarker.TryDetectForVideo(poseImage, timestampMillis, imageProcessingOptions, ref _poseResult);
 
-        var request = textureFrame.ReadTextureAsync(_webCamTexture, flipHorizontally, flipVertically);
-        yield return new WaitUntil(() => request.done);
+          var faceImage = textureFrame.BuildCPUImage();
+          var faceDetected = _faceLandmarker.TryDetectForVideo(faceImage, timestampMillis, imageProcessingOptions, ref _faceResult);
 
-        if (request.hasError)
-        {
+          var handDetected = false;
+          if (_handLandmarker != null)
+          {
+            var handImage = textureFrame.BuildCPUImage();
+            handDetected = _handLandmarker.TryDetectForVideo(handImage, timestampMillis, imageProcessingOptions, ref _handResult);
+          }
+
+          if (ShouldRunObjectDetection())
+          {
+            try
+            {
+              var objectImage = textureFrame.BuildCPUImage();
+              var objectDetected = _objectDetector.TryDetectForVideo(
+                objectImage,
+                timestampMillis,
+                imageProcessingOptions,
+                ref _objectResult);
+              UpdateSceneObjectContext(objectDetected ? _objectResult : default);
+            }
+            catch (Exception exception)
+            {
+              Debug.LogWarning($"[StudyMonitor] Object detection failed and was disabled: {exception.Message}");
+              _objectDetector?.Close();
+              _objectDetector = null;
+              ResetSceneObjectContext();
+            }
+          }
+
           textureFrame.Release();
-          Debug.LogWarning("[StudyMonitor] 摄像头画面读取失败，跳过本帧。");
+
+          AnalyzeResults(poseDetected, faceDetected, handDetected);
+          UpdateStatusUi();
+          DebugPoseEveryInterval();
+
           yield return WaitForNextDetection();
-          continue;
         }
-
-        var timestampMillis = GetTimestampMillis();
-        var poseImage = textureFrame.BuildCPUImage();
-        var poseDetected = _poseLandmarker.TryDetectForVideo(poseImage, timestampMillis, imageProcessingOptions, ref _poseResult);
-
-        var faceImage = textureFrame.BuildCPUImage();
-        var faceDetected = _faceLandmarker.TryDetectForVideo(faceImage, timestampMillis, imageProcessingOptions, ref _faceResult);
-
-        var handDetected = false;
-        if (_handLandmarker != null)
-        {
-          var handImage = textureFrame.BuildCPUImage();
-          handDetected = _handLandmarker.TryDetectForVideo(handImage, timestampMillis, imageProcessingOptions, ref _handResult);
-        }
-
-        if (ShouldRunObjectDetection())
-        {
-          try
-          {
-            var objectImage = textureFrame.BuildCPUImage();
-            var objectDetected = _objectDetector.TryDetectForVideo(
-              objectImage,
-              timestampMillis,
-              imageProcessingOptions,
-              ref _objectResult);
-            UpdateSceneObjectContext(objectDetected ? _objectResult : default);
-          }
-          catch (Exception exception)
-          {
-            Debug.LogWarning($"[StudyMonitor] Object detection failed and was disabled: {exception.Message}");
-            _objectDetector?.Close();
-            _objectDetector = null;
-            ResetSceneObjectContext();
-          }
-        }
-
-        textureFrame.Release();
-
-        AnalyzeResults(poseDetected, faceDetected, handDetected);
-        UpdateStatusUi();
-        DebugPoseEveryInterval();
-
-        yield return WaitForNextDetection();
+      }
+      finally
+      {
+        glContext?.Dispose();
       }
     }
 
