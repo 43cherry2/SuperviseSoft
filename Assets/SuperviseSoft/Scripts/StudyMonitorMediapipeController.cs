@@ -305,13 +305,20 @@ namespace SuperviseSoft.Mediapipe
           if (_cameraSwitchPending)
           {
             yield return SwitchCamera(_pendingCameraIndex);
+            if (!RecreateActiveMediapipeTasks())
+            {
+              yield break;
+            }
+
             if (useGpuImageInput)
             {
               glContext?.Dispose();
               glContext = global::Mediapipe.Unity.GpuManager.GetGlContext();
-              _inferenceStatusDetail = $"GPU 任务运行中，图像输入：GPU纹理输入，已随相机切换重建";
+              _inferenceStatusDetail = $"GPU 任务运行中，图像输入：GPU纹理输入，相机切换后已重建任务";
             }
 
+            ResetUpperBodyBaseline();
+            ResetHeadPitchBaseline();
             UpdateStatusUi();
           }
 
@@ -623,6 +630,34 @@ namespace SuperviseSoft.Mediapipe
         DisposeTaskApis();
         return false;
       }
+    }
+
+    private bool RecreateActiveMediapipeTasks()
+    {
+      var activeDelegate = _activeDelegate;
+      DisposeTaskApis();
+
+      if (!TryCreateMediapipeTasks(activeDelegate, out var error))
+      {
+        SetError($"相机切换后重建 MediaPipe 任务失败：{error}");
+        return false;
+      }
+
+      _activeDelegate = activeDelegate;
+      if (_activeDelegate == BaseOptions.Delegate.GPU)
+      {
+        _inferenceStatusDetail = $"GPU 任务已随相机切换重建，图形后端：{SystemInfo.graphicsDeviceType}，图像输入：GPU纹理输入";
+      }
+      else
+      {
+        _inferenceStatusDetail = $"CPU 任务已随相机切换重建";
+      }
+
+      _poseResult = PoseLandmarkerResult.Alloc(1, false);
+      _faceResult = FaceLandmarkerResult.Alloc(1, true, true);
+      _handResult = HandLandmarkerResult.Alloc(Mathf.Max(1, maxHands));
+      _objectResult = ObjectDetectionResult.Alloc(8);
+      return true;
     }
 
     private bool ShouldPreferGpuDelegate()
