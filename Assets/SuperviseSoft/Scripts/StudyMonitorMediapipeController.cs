@@ -295,8 +295,8 @@ namespace SuperviseSoft.Mediapipe
       SetStatus("检测已启动，等待人物进入画面...");
 
       var waitForEndOfFrame = new WaitForEndOfFrame();
-      var canUseGpuImage = CanUseGpuTextureInput();
-      using var glContext = canUseGpuImage ? global::Mediapipe.Unity.GpuManager.GetGlContext() : null;
+      var useGpuImageInput = CanUseGpuTextureInput();
+      using var glContext = useGpuImageInput ? global::Mediapipe.Unity.GpuManager.GetGlContext() : null;
 
       while (enabled)
       {
@@ -318,45 +318,73 @@ namespace SuperviseSoft.Mediapipe
         }
 
         var imageProcessingOptions = CreateImageProcessingOptions(out var flipHorizontally, out var flipVertically);
-        if (canUseGpuImage)
+        if (useGpuImageInput)
         {
-          textureFrame.ReadTextureOnGPU(_webCamTexture, flipHorizontally, flipVertically);
-          var inputImage = textureFrame.BuildGPUImage(glContext);
+          Exception gpuException = null;
+          global::Mediapipe.Image inputImage = null;
+          try
+          {
+            textureFrame.ReadTextureOnGPU(_webCamTexture, flipHorizontally, flipVertically);
+            inputImage = textureFrame.BuildGPUImage(glContext);
+          }
+          catch (Exception exception)
+          {
+            gpuException = exception;
+          }
+
+          if (gpuException != null)
+          {
+            Debug.LogWarning($"[StudyMonitor] GPU texture input failed and will retry on GPU: {gpuException.Message}");
+            _inferenceStatusDetail = $"GPU 任务运行中，GPU纹理输入本帧失败，继续重试 GPU：{gpuException.Message}";
+            textureFrame.Release();
+            yield return WaitForNextDetection();
+            continue;
+          }
+
           yield return waitForEndOfFrame;
 
-          var timestampMillisGpu = GetTimestampMillis();
-          var poseDetectedGpu = _poseLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _poseResult);
-          var faceDetectedGpu = _faceLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _faceResult);
-
-          var handDetectedGpu = false;
-          if (_handLandmarker != null)
+          try
           {
-            handDetectedGpu = _handLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _handResult);
-          }
+            var timestampMillisGpu = GetTimestampMillis();
+            var poseDetectedGpu = _poseLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _poseResult);
+            var faceDetectedGpu = _faceLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _faceResult);
 
-          if (ShouldRunObjectDetection())
+            var handDetectedGpu = false;
+            if (_handLandmarker != null)
+            {
+              handDetectedGpu = _handLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _handResult);
+            }
+
+            if (ShouldRunObjectDetection())
+            {
+              try
+              {
+                var objectDetected = _objectDetector.TryDetectForVideo(
+                  inputImage,
+                  timestampMillisGpu,
+                  imageProcessingOptions,
+                  ref _objectResult);
+                UpdateSceneObjectContext(objectDetected ? _objectResult : default);
+              }
+              catch (Exception exception)
+              {
+                Debug.LogWarning($"[StudyMonitor] Object detection failed and was disabled: {exception.Message}");
+                _objectDetector?.Close();
+                _objectDetector = null;
+                ResetSceneObjectContext();
+              }
+            }
+
+            AnalyzeResults(poseDetectedGpu, faceDetectedGpu, handDetectedGpu);
+            UpdateStatusUi();
+            DebugPoseEveryInterval();
+          }
+          catch (Exception exception)
           {
-            try
-            {
-              var objectDetected = _objectDetector.TryDetectForVideo(
-                inputImage,
-                timestampMillisGpu,
-                imageProcessingOptions,
-                ref _objectResult);
-              UpdateSceneObjectContext(objectDetected ? _objectResult : default);
-            }
-            catch (Exception exception)
-            {
-              Debug.LogWarning($"[StudyMonitor] Object detection failed and was disabled: {exception.Message}");
-              _objectDetector?.Close();
-              _objectDetector = null;
-              ResetSceneObjectContext();
-            }
+            Debug.LogWarning($"[StudyMonitor] GPU inference failed and will retry on GPU: {exception.Message}");
+            _inferenceStatusDetail = $"GPU 任务运行中，GPU推理本帧失败，继续重试 GPU：{exception.Message}";
+            textureFrame.Release();
           }
-
-          AnalyzeResults(poseDetectedGpu, faceDetectedGpu, handDetectedGpu);
-          UpdateStatusUi();
-          DebugPoseEveryInterval();
 
           yield return WaitForNextDetection();
           continue;
@@ -848,20 +876,18 @@ namespace SuperviseSoft.Mediapipe
       var devices = WebCamTexture.devices;
       if (index < 0 || index >= devices.Length)
       {
+        SetStatus("切换相机失败：相机列表已变化，请重新选择。");
         RefreshCameraPickerList(false);
+        _cameraSwitchPending = false;
         yield break;
       }
 
-      if (_webCamTexture != null)
+      if (_webCamTexture != null && _webCamTexture.isPlaying)
       {
-        if (_webCamTexture.isPlaying)
-        {
-          _webCamTexture.Stop();
-        }
-
-        _webCamTexture = null;
+        _webCamTexture.Stop();
       }
 
+      _webCamTexture = null;
       _textureFramePool?.Dispose();
       _textureFramePool = null;
 
@@ -901,6 +927,9 @@ namespace SuperviseSoft.Mediapipe
       }
 
       UpdateCameraPreviewTransform();
+      ApplyCameraVisibility();
+      SetStatus($"相机切换完成：{BuildCameraOptionLabel(device, index, false)}");
+      yield return null;
     }
 
     private static string BuildCameraOptionLabel(WebCamDevice device, int index, bool selected)
