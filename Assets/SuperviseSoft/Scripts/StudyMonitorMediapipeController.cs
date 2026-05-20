@@ -109,8 +109,9 @@ namespace SuperviseSoft.Mediapipe
     public float upperBodyBaselineSeconds = 1.2f;
     public float upperBodyStandingYOffset = 0.12f;
     public float upperBodyStandingScaleBoost = 0.18f;
-    public bool preferGpuDelegateOnAndroid = false;
+    public bool preferGpuDelegateOnAndroid = true;
     public bool useGpuTextureInputOnAndroid = false;
+    public float cameraWarmupBeforeGpuSeconds = 0.35f;
     public bool enableDeskAwarePosture = true;
     public bool deskObjectsOverrideFullBodyPosture = true;
     public bool enableObjectDetectionPostureEvidence = true;
@@ -245,23 +246,6 @@ namespace SuperviseSoft.Mediapipe
 
       _inferenceStatusDetail = $"图形后端：{SystemInfo.graphicsDeviceType}";
 
-      if (ShouldPreferGpuDelegate())
-      {
-        yield return global::Mediapipe.Unity.GpuManager.Initialize();
-        _inferenceStatusDetail = global::Mediapipe.Unity.GpuManager.IsInitialized
-          ? $"GPU 初始化成功，图形后端：{SystemInfo.graphicsDeviceType}"
-          : $"GPU 初始化失败，图形后端：{SystemInfo.graphicsDeviceType}";
-      }
-      else if (preferGpuDelegateOnAndroid)
-      {
-        _inferenceStatusDetail = $"GPU 未启用：当前图形后端为 {SystemInfo.graphicsDeviceType}，需要 OpenGLES3";
-      }
-
-      if (!InitializeMediapipeTasks())
-      {
-        yield break;
-      }
-
       yield return StartCamera();
       if (_webCamTexture == null || !_webCamTexture.isPlaying)
       {
@@ -269,13 +253,37 @@ namespace SuperviseSoft.Mediapipe
         yield break;
       }
 
-      _textureFramePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 4);
       if (cameraView != null)
       {
         cameraView.texture = _webCamTexture;
       }
       UpdateCameraPreviewTransform();
       ApplyCameraVisibility();
+
+      if (cameraWarmupBeforeGpuSeconds > 0f)
+      {
+        yield return new WaitForSeconds(cameraWarmupBeforeGpuSeconds);
+      }
+
+      if (ShouldPreferGpuDelegate())
+      {
+        SetStatus("相机已启动，正在初始化 GPU...");
+        yield return global::Mediapipe.Unity.GpuManager.Initialize();
+        _inferenceStatusDetail = global::Mediapipe.Unity.GpuManager.IsInitialized
+          ? $"GPU 初始化成功，图形后端：{SystemInfo.graphicsDeviceType}"
+          : $"GPU 初始化失败，图形后端：{SystemInfo.graphicsDeviceType}";
+      }
+      else if (preferGpuDelegateOnAndroid)
+      {
+        _inferenceStatusDetail = $"GPU 未启用：当前图形后端为 {SystemInfo.graphicsDeviceType}";
+      }
+
+      if (!InitializeMediapipeTasks())
+      {
+        yield break;
+      }
+
+      _textureFramePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 4);
 
       _poseResult = PoseLandmarkerResult.Alloc(1, false);
       _faceResult = FaceLandmarkerResult.Alloc(1, true, true);
@@ -287,11 +295,7 @@ namespace SuperviseSoft.Mediapipe
       SetStatus("检测已启动，等待人物进入画面...");
 
       var waitForEndOfFrame = new WaitForEndOfFrame();
-      var canUseGpuImage =
-        useGpuTextureInputOnAndroid &&
-        _activeDelegate == BaseOptions.Delegate.GPU &&
-        SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3 &&
-        global::Mediapipe.Unity.GpuManager.GpuResources != null;
+      var canUseGpuImage = CanUseGpuTextureInput();
       using var glContext = canUseGpuImage ? global::Mediapipe.Unity.GpuManager.GetGlContext() : null;
 
       while (enabled)
@@ -469,7 +473,8 @@ namespace SuperviseSoft.Mediapipe
           _activeDelegate = preferredDelegate;
           if (preferredDelegate == BaseOptions.Delegate.GPU)
           {
-            _inferenceStatusDetail = $"GPU 任务创建成功，图形后端：{SystemInfo.graphicsDeviceType}";
+            var inputMode = CanUseGpuTextureInput() ? "GPU纹理输入" : "CPU相机帧上传";
+            _inferenceStatusDetail = $"GPU 任务创建成功，图形后端：{SystemInfo.graphicsDeviceType}，图像输入：{inputMode}";
           }
           return true;
         }
@@ -580,7 +585,19 @@ namespace SuperviseSoft.Mediapipe
     private bool ShouldPreferGpuDelegate()
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
-      return preferGpuDelegateOnAndroid && SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3;
+      return preferGpuDelegateOnAndroid;
+#else
+      return false;
+#endif
+    }
+
+    private bool CanUseGpuTextureInput()
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+      return useGpuTextureInputOnAndroid &&
+             _activeDelegate == BaseOptions.Delegate.GPU &&
+             SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3 &&
+             global::Mediapipe.Unity.GpuManager.GpuResources != null;
 #else
       return false;
 #endif
@@ -1282,6 +1299,11 @@ namespace SuperviseSoft.Mediapipe
       DisposeTaskApis();
       _textureFramePool?.Dispose();
       _textureFramePool = null;
+
+      if (global::Mediapipe.Unity.GpuManager.IsInitialized)
+      {
+        global::Mediapipe.Unity.GpuManager.Shutdown();
+      }
 
       if (_isMediapipeInitialized)
       {

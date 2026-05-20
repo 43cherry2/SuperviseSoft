@@ -358,7 +358,7 @@ namespace SuperviseSoft.Mediapipe
       builder.AppendLine($"结果：{_lastResult}");
       builder.AppendLine();
       builder.AppendLine("【测试顺序建议】");
-      builder.AppendLine("1. 先看图形后端。如果是 Vulkan，基本可以解释主场景打开 GPU 就崩。");
+      builder.AppendLine("1. 先看图形后端。Vulkan 下初始化/任务创建可能成功，但 GPU 纹理输入仍需单独验证。");
       builder.AppendLine("2. 点“相机预览”，确认相机权限和画面本身正常。");
       builder.AppendLine("3. 点“CPU任务对照”，确认模型和 MediaPipe CPU 正常。");
       builder.AppendLine("4. 只在需要定位崩溃时点“危险: GPU初始化”。如果闪退，回来后看“上次危险步骤记录”。");
@@ -371,7 +371,7 @@ namespace SuperviseSoft.Mediapipe
     {
       if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Vulkan)
       {
-        return "当前是 Vulkan。Homuler MediaPipe Unity 的 GPU/EGL 共享路径主要依赖 OpenGLES3；在 Vulkan 下启用 GPU 很可能在 GpuManager.Initialize 或 GPU delegate 创建时原生崩溃。";
+        return "当前是 Vulkan。实测 GPU 初始化和 GPU delegate 创建可能成功；主场景将优先用 GPU delegate + CPU 相机帧上传的安全模式，暂不在 Vulkan 下启用 GPU 纹理输入。";
       }
 
       if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3)
