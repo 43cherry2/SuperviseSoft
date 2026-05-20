@@ -420,7 +420,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9d852fce73b746e4b8e977fb90a8f244, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  poseModel: {fileID: 4900000, guid: 16cbc09f82415298ebef10c9bdafa058, type: 3}
   faceModel: {fileID: 4900000, guid: 5838e83559205ed6b9bdd94fa57e9a18, type: 3}
+  handModel: {fileID: 4900000, guid: b467f87f6b5d4d200974b3ca14f53987, type: 3}
+  objectModel: {fileID: 4900000, guid: e2200334e5b8e4a6ca638728497e7b71, type: 3}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

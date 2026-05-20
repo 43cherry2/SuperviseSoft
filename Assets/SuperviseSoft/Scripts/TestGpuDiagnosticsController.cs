@@ -1,15 +1,21 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Text;
+using Mediapipe.Tasks.Components.Containers;
 using Mediapipe.Tasks.Core;
 using Mediapipe.Tasks.Vision.Core;
 using Mediapipe.Tasks.Vision.FaceLandmarker;
+using Mediapipe.Tasks.Vision.HandLandmarker;
+using Mediapipe.Tasks.Vision.ObjectDetector;
+using Mediapipe.Tasks.Vision.PoseLandmarker;
 using Mediapipe.Unity;
 using Mediapipe.Unity.Experimental;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.Rendering;
 using UnityEngine.UI;
+using VisionRunningMode = Mediapipe.Tasks.Vision.Core.RunningMode;
 
 namespace SuperviseSoft.Mediapipe
 {
@@ -20,7 +26,10 @@ namespace SuperviseSoft.Mediapipe
     private const string StepTimeKey = "SuperviseSoft.TestGpu.LastStepTime";
 
     [Header("Models")]
+    public TextAsset poseModel;
     public TextAsset faceModel;
+    public TextAsset handModel;
+    public TextAsset objectModel;
 
     private Text _reportText;
     private RawImage _cameraPreview;
@@ -33,6 +42,8 @@ namespace SuperviseSoft.Mediapipe
     private GridLayoutGroup _buttonGrid;
     private WebCamTexture _webCamTexture;
     private Coroutine _cameraCoroutine;
+    private int _selectedCameraIndex;
+    private int _lastInferenceFrameId;
     private string _lastAction = "等待操作";
     private string _lastResult = "尚未测试";
     private string _lastInferencePath = "尚未运行图像推理";
@@ -61,15 +72,7 @@ namespace SuperviseSoft.Mediapipe
         _cameraCoroutine = null;
       }
 
-      if (_webCamTexture != null)
-      {
-        if (_webCamTexture.isPlaying)
-        {
-          _webCamTexture.Stop();
-        }
-
-        _webCamTexture = null;
-      }
+      StopCameraPreview();
 
       if (GpuManager.IsInitialized)
       {
@@ -125,11 +128,25 @@ namespace SuperviseSoft.Mediapipe
         _cameraCoroutine = StartCoroutine(StartCameraPreview());
       });
 
+      AddButton(buttonBar.transform, font, "切换相机", 340f, () =>
+      {
+        if (_cameraCoroutine != null)
+        {
+          StopCoroutine(_cameraCoroutine);
+        }
+
+        _cameraCoroutine = StartCoroutine(SwitchCameraPreview());
+      });
+
       AddButton(buttonBar.transform, font, "CPU任务对照", 340f, () => RunAction("CPU FaceLandmarker 任务创建", TestCpuTaskCreation));
       AddButton(buttonBar.transform, font, "危险: GPU初始化", 504f, () => StartCoroutine(RunGpuInitialize()));
       AddButton(buttonBar.transform, font, "危险: GPU任务", 700f, () => RunAction("GPU FaceLandmarker 任务创建", TestGpuTaskCreation));
       AddButton(buttonBar.transform, font, "CPU单帧推理", 880f, () => StartCoroutine(RunSingleFrameInference(BaseOptions.Delegate.CPU, false)));
       AddButton(buttonBar.transform, font, "危险: GPU单帧", 1060f, () => StartCoroutine(RunSingleFrameInference(BaseOptions.Delegate.GPU, true)));
+      AddButton(buttonBar.transform, font, "CPU完整诊断", 1240f, () => StartCoroutine(RunFullPipelineInference(BaseOptions.Delegate.CPU, false, VisionRunningMode.IMAGE)));
+      AddButton(buttonBar.transform, font, "GPU完整诊断", 1420f, () => StartCoroutine(RunFullPipelineInference(BaseOptions.Delegate.GPU, true, VisionRunningMode.IMAGE)));
+      AddButton(buttonBar.transform, font, "GPU视频诊断", 1600f, () => StartCoroutine(RunFullPipelineInference(BaseOptions.Delegate.GPU, true, VisionRunningMode.VIDEO)));
+      AddButton(buttonBar.transform, font, "GPU变换扫描", 1780f, () => StartCoroutine(RunTransformScan(BaseOptions.Delegate.GPU, true)));
       AddButton(buttonBar.transform, font, "清除崩溃记录", 880f, () =>
       {
         PlayerPrefs.DeleteKey(CrashStepKey);
@@ -178,23 +195,46 @@ namespace SuperviseSoft.Mediapipe
       RefreshReport();
     }
 
+    private IEnumerator SwitchCameraPreview()
+    {
+      if (_isBusy)
+      {
+        yield break;
+      }
+
+      _isBusy = true;
+      var devices = WebCamTexture.devices;
+      if (devices.Length == 0)
+      {
+        _lastAction = "切换相机";
+        _lastResult = "未找到相机";
+        _isBusy = false;
+        RefreshReport();
+        yield break;
+      }
+
+      _selectedCameraIndex = (_selectedCameraIndex + 1) % devices.Length;
+      _lastAction = $"切换相机到 #{_selectedCameraIndex}";
+      _lastResult = $"正在启动：{devices[_selectedCameraIndex].name}，前置={devices[_selectedCameraIndex].isFrontFacing}";
+      RefreshReport();
+
+      StopCameraPreview();
+      yield return EnsureCameraPreviewRunning();
+
+      _isBusy = false;
+      RefreshReport();
+    }
+
     private IEnumerator EnsureCameraPreviewRunning()
     {
       if (_webCamTexture != null && _webCamTexture.isPlaying && _webCamTexture.width > 16)
       {
-        _lastResult = $"相机已就绪：{_webCamTexture.width}x{_webCamTexture.height}，旋转={_webCamTexture.videoRotationAngle}，竖向镜像={_webCamTexture.videoVerticallyMirrored}";
+        var runningDevice = GetCurrentCameraDevice();
+        _lastResult = $"相机已就绪：#{_selectedCameraIndex} {runningDevice.name}，前置={runningDevice.isFrontFacing}，{_webCamTexture.width}x{_webCamTexture.height}，旋转={_webCamTexture.videoRotationAngle}，竖向镜像={_webCamTexture.videoVerticallyMirrored}";
         yield break;
       }
 
-      if (_webCamTexture != null)
-      {
-        if (_webCamTexture.isPlaying)
-        {
-          _webCamTexture.Stop();
-        }
-
-        _webCamTexture = null;
-      }
+      StopCameraPreview();
 
       var devices = WebCamTexture.devices;
       if (devices.Length == 0)
@@ -203,7 +243,8 @@ namespace SuperviseSoft.Mediapipe
         yield break;
       }
 
-      var device = devices[0];
+      _selectedCameraIndex = Mathf.Clamp(_selectedCameraIndex, 0, devices.Length - 1);
+      var device = devices[_selectedCameraIndex];
       _webCamTexture = new WebCamTexture(device.name, 640, 480, 30);
       _webCamTexture.Play();
       _cameraPreview.texture = _webCamTexture;
@@ -217,9 +258,28 @@ namespace SuperviseSoft.Mediapipe
       }
 
       _lastResult = _webCamTexture != null && _webCamTexture.width > 16
-        ? $"相机已启动：{device.name}，{_webCamTexture.width}x{_webCamTexture.height}，旋转={_webCamTexture.videoRotationAngle}，竖向镜像={_webCamTexture.videoVerticallyMirrored}"
+        ? $"相机已启动：#{_selectedCameraIndex} {device.name}，前置={device.isFrontFacing}，{_webCamTexture.width}x{_webCamTexture.height}，旋转={_webCamTexture.videoRotationAngle}，竖向镜像={_webCamTexture.videoVerticallyMirrored}"
         : "相机启动超时，可能是权限或设备占用";
       UpdateCameraPreviewTransform();
+    }
+
+    private void StopCameraPreview()
+    {
+      if (_webCamTexture == null)
+      {
+        return;
+      }
+
+      if (_webCamTexture.isPlaying)
+      {
+        _webCamTexture.Stop();
+      }
+
+      _webCamTexture = null;
+      if (_cameraPreview != null)
+      {
+        _cameraPreview.texture = null;
+      }
     }
 
     private IEnumerator RunGpuInitialize()
@@ -451,17 +511,605 @@ namespace SuperviseSoft.Mediapipe
       }
     }
 
+    private IEnumerator RunFullPipelineInference(BaseOptions.Delegate delegateCase, bool allowGpuTextureInput, VisionRunningMode runningMode)
+    {
+      if (_isBusy)
+      {
+        yield break;
+      }
+
+      _isBusy = true;
+      var action = $"{delegateCase} 完整链路诊断 ({runningMode})";
+      _lastAction = action;
+      _lastResult = "准备相机、GPU 和四个任务...";
+      MarkStepStarted(action);
+      RefreshReport();
+
+      PoseLandmarker poseTask = null;
+      FaceLandmarker faceTask = null;
+      HandLandmarker handTask = null;
+      ObjectDetector objectTask = null;
+      TextureFramePool framePool = null;
+
+      try
+      {
+        yield return EnsureCameraPreviewRunning();
+        if (_webCamTexture == null || !_webCamTexture.isPlaying || _webCamTexture.width <= 16)
+        {
+          _lastResult = "失败：相机没有可用画面，无法做完整诊断。";
+          yield break;
+        }
+
+        if (delegateCase == BaseOptions.Delegate.GPU &&
+            (!GpuManager.IsInitialized || GpuManager.GpuResources == null))
+        {
+          _lastResult = "正在初始化 GPU...";
+          RefreshReport();
+          yield return GpuManager.Initialize();
+        }
+
+        if (delegateCase == BaseOptions.Delegate.GPU &&
+            (!GpuManager.IsInitialized || GpuManager.GpuResources == null))
+        {
+          _lastResult = "失败：GpuManager 初始化后仍不可用。";
+          yield break;
+        }
+
+        var gpuResources = delegateCase == BaseOptions.Delegate.GPU ? GpuManager.GpuResources : null;
+        var taskCreation = new StringBuilder(512);
+        CreateDiagnosticTasks(delegateCase, runningMode, gpuResources, taskCreation, out poseTask, out faceTask, out handTask, out objectTask);
+
+        framePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 8);
+        var imageProcessingOptions = CreateImageProcessingOptions(
+          false,
+          out var flipHorizontally,
+          out var flipVertically,
+          out var rotationDegrees);
+        var useGpuTexture = delegateCase == BaseOptions.Delegate.GPU &&
+                            allowGpuTextureInput &&
+                            SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3;
+
+        using var glContext = useGpuTexture ? GpuManager.GetGlContext() : null;
+        var builder = new StringBuilder(1600);
+        builder.AppendLine($"链路：{delegateCase} delegate / {(useGpuTexture ? "GPU纹理输入" : "CPU相机帧输入")} / {runningMode}");
+        builder.AppendLine(GetCameraSummary());
+        builder.AppendLine($"输入变换：rotationDegrees={rotationDegrees}, flipH={flipHorizontally}, flipV={flipVertically}");
+        builder.Append(taskCreation);
+
+        var timestamp = GetTimestampMillis();
+        if (poseTask != null)
+        {
+          yield return RunTaskOnCurrentFrame(
+            "Pose",
+            useGpuTexture,
+            framePool,
+            glContext,
+            imageProcessingOptions,
+            flipHorizontally,
+            flipVertically,
+            builder,
+            image => SummarizePose(poseTask, image, imageProcessingOptions, runningMode, timestamp++));
+        }
+
+        if (faceTask != null)
+        {
+          yield return RunTaskOnCurrentFrame(
+            "Face",
+            useGpuTexture,
+            framePool,
+            glContext,
+            imageProcessingOptions,
+            flipHorizontally,
+            flipVertically,
+            builder,
+            image => SummarizeFace(faceTask, image, imageProcessingOptions, runningMode, timestamp++));
+        }
+
+        if (handTask != null)
+        {
+          yield return RunTaskOnCurrentFrame(
+            "Hand",
+            useGpuTexture,
+            framePool,
+            glContext,
+            imageProcessingOptions,
+            flipHorizontally,
+            flipVertically,
+            builder,
+            image => SummarizeHand(handTask, image, imageProcessingOptions, runningMode, timestamp++));
+        }
+
+        if (objectTask != null)
+        {
+          yield return RunTaskOnCurrentFrame(
+            "Object",
+            useGpuTexture,
+            framePool,
+            glContext,
+            imageProcessingOptions,
+            flipHorizontally,
+            flipVertically,
+            builder,
+            image => SummarizeObjects(objectTask, image, imageProcessingOptions, runningMode, timestamp++));
+        }
+
+        _lastInferenceFrameId++;
+        _lastInferencePath = $"{delegateCase} / {(useGpuTexture ? "GPU纹理输入" : "CPU相机帧输入")} / {runningMode} / frame#{_lastInferenceFrameId}";
+        _lastResult = builder.ToString();
+      }
+      finally
+      {
+        poseTask?.Close();
+        faceTask?.Close();
+        handTask?.Close();
+        objectTask?.Close();
+        framePool?.Dispose();
+        MarkStepCompleted(action);
+        _isBusy = false;
+        RefreshReport();
+      }
+    }
+
+    private IEnumerator RunTransformScan(BaseOptions.Delegate delegateCase, bool allowGpuTextureInput)
+    {
+      if (_isBusy)
+      {
+        yield break;
+      }
+
+      _isBusy = true;
+      var action = $"{delegateCase} 变换扫描";
+      _lastAction = action;
+      _lastResult = "准备扫描相机旋转和镜像组合...";
+      MarkStepStarted(action);
+      RefreshReport();
+
+      PoseLandmarker poseTask = null;
+      FaceLandmarker faceTask = null;
+      TextureFramePool framePool = null;
+
+      try
+      {
+        yield return EnsureCameraPreviewRunning();
+        if (_webCamTexture == null || !_webCamTexture.isPlaying || _webCamTexture.width <= 16)
+        {
+          _lastResult = "失败：相机没有可用画面，无法做变换扫描。";
+          yield break;
+        }
+
+        if (delegateCase == BaseOptions.Delegate.GPU &&
+            (!GpuManager.IsInitialized || GpuManager.GpuResources == null))
+        {
+          _lastResult = "正在初始化 GPU...";
+          RefreshReport();
+          yield return GpuManager.Initialize();
+        }
+
+        if (delegateCase == BaseOptions.Delegate.GPU &&
+            (!GpuManager.IsInitialized || GpuManager.GpuResources == null))
+        {
+          _lastResult = "失败：GpuManager 初始化后仍不可用。";
+          yield break;
+        }
+
+        var gpuResources = delegateCase == BaseOptions.Delegate.GPU ? GpuManager.GpuResources : null;
+        var taskCreation = new StringBuilder(256);
+        if (poseModel != null)
+        {
+          try
+          {
+            poseTask = PoseLandmarker.CreateFromOptions(
+              CreatePoseOptions(delegateCase, VisionRunningMode.IMAGE),
+              gpuResources);
+            taskCreation.AppendLine("Pose 任务：已创建");
+          }
+          catch (Exception exception)
+          {
+            taskCreation.AppendLine($"Pose 任务：创建异常 {exception.GetType().Name}: {exception.Message}");
+            Debug.LogException(exception);
+          }
+        }
+        else
+        {
+          taskCreation.AppendLine("Pose 任务：跳过，poseModel 未绑定");
+        }
+
+        if (faceModel != null)
+        {
+          try
+          {
+            faceTask = FaceLandmarker.CreateFromOptions(
+              CreateFaceOptions(delegateCase, VisionRunningMode.IMAGE),
+              gpuResources);
+            taskCreation.AppendLine("Face 任务：已创建");
+          }
+          catch (Exception exception)
+          {
+            taskCreation.AppendLine($"Face 任务：创建异常 {exception.GetType().Name}: {exception.Message}");
+            Debug.LogException(exception);
+          }
+        }
+        else
+        {
+          taskCreation.AppendLine("Face 任务：跳过，faceModel 未绑定");
+        }
+
+        var useGpuTexture = delegateCase == BaseOptions.Delegate.GPU &&
+                            allowGpuTextureInput &&
+                            SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3;
+        framePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 40);
+        using var glContext = useGpuTexture ? GpuManager.GetGlContext() : null;
+
+        var builder = new StringBuilder(2200);
+        builder.AppendLine($"扫描链路：{delegateCase} delegate / {(useGpuTexture ? "GPU纹理输入" : "CPU相机帧输入")} / IMAGE");
+        builder.AppendLine(GetCameraSummary());
+        builder.AppendLine($"说明：每组只测 Face/Pose；如果某个 rotation/flip 能检测，主场景大概率是相机变换问题。");
+        builder.Append(taskCreation);
+
+        var rotations = new[] { 0, 90, 180, 270 };
+        var horizontalFlips = new[] { false, true };
+        var flipVertically = _webCamTexture.videoVerticallyMirrored;
+        var timestamp = GetTimestampMillis();
+
+        foreach (var rotation in rotations)
+        {
+          foreach (var flipHorizontally in horizontalFlips)
+          {
+            var options = new ImageProcessingOptions(rotationDegrees: rotation);
+            builder.AppendLine($"组合 rotation={rotation}, flipH={flipHorizontally}, flipV={flipVertically}");
+
+            if (faceTask != null)
+            {
+              yield return RunTaskOnCurrentFrame(
+                "  Face",
+                useGpuTexture,
+                framePool,
+                glContext,
+                options,
+                flipHorizontally,
+                flipVertically,
+                builder,
+                image => SummarizeFace(faceTask, image, options, VisionRunningMode.IMAGE, timestamp++));
+            }
+
+            if (poseTask != null)
+            {
+              yield return RunTaskOnCurrentFrame(
+                "  Pose",
+                useGpuTexture,
+                framePool,
+                glContext,
+                options,
+                flipHorizontally,
+                flipVertically,
+                builder,
+                image => SummarizePose(poseTask, image, options, VisionRunningMode.IMAGE, timestamp++));
+            }
+          }
+        }
+
+        _lastInferenceFrameId++;
+        _lastInferencePath = $"{delegateCase} 变换扫描 / {(useGpuTexture ? "GPU纹理输入" : "CPU相机帧输入")} / frame#{_lastInferenceFrameId}";
+        _lastResult = builder.ToString();
+      }
+      finally
+      {
+        poseTask?.Close();
+        faceTask?.Close();
+        framePool?.Dispose();
+        MarkStepCompleted(action);
+        _isBusy = false;
+        RefreshReport();
+      }
+    }
+
+    private void CreateDiagnosticTasks(
+      BaseOptions.Delegate delegateCase,
+      VisionRunningMode runningMode,
+      global::Mediapipe.GpuResources gpuResources,
+      StringBuilder builder,
+      out PoseLandmarker poseTask,
+      out FaceLandmarker faceTask,
+      out HandLandmarker handTask,
+      out ObjectDetector objectTask)
+    {
+      poseTask = null;
+      faceTask = null;
+      handTask = null;
+      objectTask = null;
+
+      if (poseModel == null)
+      {
+        builder.AppendLine("Pose 任务：跳过，poseModel 未绑定");
+      }
+      else
+      {
+        try
+        {
+          poseTask = PoseLandmarker.CreateFromOptions(CreatePoseOptions(delegateCase, runningMode), gpuResources);
+          builder.AppendLine("Pose 任务：已创建");
+        }
+        catch (Exception exception)
+        {
+          builder.AppendLine($"Pose 任务：创建异常 {exception.GetType().Name}: {exception.Message}");
+          Debug.LogException(exception);
+        }
+      }
+
+      if (faceModel == null)
+      {
+        builder.AppendLine("Face 任务：跳过，faceModel 未绑定");
+      }
+      else
+      {
+        try
+        {
+          faceTask = FaceLandmarker.CreateFromOptions(CreateFaceOptions(delegateCase, runningMode), gpuResources);
+          builder.AppendLine("Face 任务：已创建");
+        }
+        catch (Exception exception)
+        {
+          builder.AppendLine($"Face 任务：创建异常 {exception.GetType().Name}: {exception.Message}");
+          Debug.LogException(exception);
+        }
+      }
+
+      if (handModel == null)
+      {
+        builder.AppendLine("Hand 任务：跳过，handModel 未绑定");
+      }
+      else
+      {
+        try
+        {
+          handTask = HandLandmarker.CreateFromOptions(CreateHandOptions(delegateCase, runningMode), gpuResources);
+          builder.AppendLine("Hand 任务：已创建");
+        }
+        catch (Exception exception)
+        {
+          builder.AppendLine($"Hand 任务：创建异常 {exception.GetType().Name}: {exception.Message}");
+          Debug.LogException(exception);
+        }
+      }
+
+      if (objectModel == null)
+      {
+        builder.AppendLine("Object 任务：跳过，objectModel 未绑定");
+      }
+      else
+      {
+        try
+        {
+          objectTask = ObjectDetector.CreateFromOptions(CreateObjectOptions(delegateCase, runningMode), gpuResources);
+          builder.AppendLine("Object 任务：已创建");
+        }
+        catch (Exception exception)
+        {
+          builder.AppendLine($"Object 任务：创建异常 {exception.GetType().Name}: {exception.Message}");
+          Debug.LogException(exception);
+        }
+      }
+    }
+
+    private PoseLandmarkerOptions CreatePoseOptions(BaseOptions.Delegate delegateCase, VisionRunningMode runningMode)
+      => new PoseLandmarkerOptions(
+        new BaseOptions(delegateCase, modelAssetBuffer: poseModel.bytes),
+        runningMode: runningMode,
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.5f,
+        minPosePresenceConfidence: 0.5f,
+        minTrackingConfidence: 0.5f,
+        outputSegmentationMasks: false);
+
+    private FaceLandmarkerOptions CreateFaceOptions(BaseOptions.Delegate delegateCase, VisionRunningMode runningMode)
+      => new FaceLandmarkerOptions(
+        new BaseOptions(delegateCase, modelAssetBuffer: faceModel.bytes),
+        runningMode: runningMode,
+        numFaces: 1,
+        minFaceDetectionConfidence: 0.5f,
+        minFacePresenceConfidence: 0.5f,
+        minTrackingConfidence: 0.5f,
+        outputFaceBlendshapes: true,
+        outputFaceTransformationMatrixes: true);
+
+    private HandLandmarkerOptions CreateHandOptions(BaseOptions.Delegate delegateCase, VisionRunningMode runningMode)
+      => new HandLandmarkerOptions(
+        new BaseOptions(delegateCase, modelAssetBuffer: handModel.bytes),
+        runningMode: runningMode,
+        numHands: 2,
+        minHandDetectionConfidence: 0.5f,
+        minHandPresenceConfidence: 0.5f,
+        minTrackingConfidence: 0.5f);
+
+    private ObjectDetectorOptions CreateObjectOptions(BaseOptions.Delegate delegateCase, VisionRunningMode runningMode)
+      => new ObjectDetectorOptions(
+        new BaseOptions(delegateCase, modelAssetBuffer: objectModel.bytes),
+        runningMode: runningMode,
+        maxResults: 8,
+        scoreThreshold: 0.25f,
+        categoryAllowList: null);
+
+    private IEnumerator RunTaskOnCurrentFrame(
+      string label,
+      bool useGpuTexture,
+      TextureFramePool framePool,
+      global::Mediapipe.GlContext glContext,
+      ImageProcessingOptions imageProcessingOptions,
+      bool flipHorizontally,
+      bool flipVertically,
+      StringBuilder builder,
+      Func<global::Mediapipe.Image, string> detect)
+    {
+      if (!framePool.TryGetTextureFrame(out var textureFrame))
+      {
+        builder.AppendLine($"{label}: 失败，TextureFramePool 暂时没有空闲帧");
+        yield break;
+      }
+
+      global::Mediapipe.Image inputImage = null;
+      if (useGpuTexture)
+      {
+        try
+        {
+          textureFrame.ReadTextureOnGPU(_webCamTexture, flipHorizontally, flipVertically);
+          inputImage = textureFrame.BuildGPUImage(glContext);
+        }
+        catch (Exception exception)
+        {
+          textureFrame.Release();
+          builder.AppendLine($"{label}: GPU图像构建异常 {exception.GetType().Name}: {exception.Message}");
+          Debug.LogException(exception);
+          yield break;
+        }
+
+        yield return new WaitForEndOfFrame();
+      }
+      else
+      {
+        var request = textureFrame.ReadTextureAsync(_webCamTexture, flipHorizontally, flipVertically);
+        yield return new WaitUntil(() => request.done);
+        if (request.hasError)
+        {
+          textureFrame.Release();
+          builder.AppendLine($"{label}: 失败，读取相机帧到 CPU 出错");
+          yield break;
+        }
+
+        inputImage = textureFrame.BuildCPUImage();
+        textureFrame.Release();
+      }
+
+      try
+      {
+        builder.AppendLine($"{label}: {detect(inputImage)}");
+      }
+      catch (Exception exception)
+      {
+        builder.AppendLine($"{label}: 推理异常 {exception.GetType().Name}: {exception.Message}");
+        Debug.LogException(exception);
+      }
+    }
+
+    private static string SummarizePose(
+      PoseLandmarker task,
+      global::Mediapipe.Image image,
+      ImageProcessingOptions imageProcessingOptions,
+      VisionRunningMode runningMode,
+      long timestamp)
+    {
+      var result = PoseLandmarkerResult.Alloc(1, false);
+      var detected = runningMode == VisionRunningMode.IMAGE
+        ? task.TryDetect(image, imageProcessingOptions, ref result)
+        : task.TryDetectForVideo(image, timestamp, imageProcessingOptions, ref result);
+      var personCount = result.poseLandmarks?.Count ?? 0;
+      var pointCount = personCount > 0 ? result.poseLandmarks[0].landmarks?.Count ?? 0 : 0;
+      return $"detected={detected}, 人数={personCount}, 点数={pointCount}";
+    }
+
+    private static string SummarizeFace(
+      FaceLandmarker task,
+      global::Mediapipe.Image image,
+      ImageProcessingOptions imageProcessingOptions,
+      VisionRunningMode runningMode,
+      long timestamp)
+    {
+      var result = FaceLandmarkerResult.Alloc(1, true, true);
+      var detected = runningMode == VisionRunningMode.IMAGE
+        ? task.TryDetect(image, imageProcessingOptions, ref result)
+        : task.TryDetectForVideo(image, timestamp, imageProcessingOptions, ref result);
+      var faceCount = result.faceLandmarks?.Count ?? 0;
+      var pointCount = faceCount > 0 ? result.faceLandmarks[0].landmarks?.Count ?? 0 : 0;
+      var blendshapeCount = result.faceBlendshapes?.Count ?? 0;
+      return $"detected={detected}, 人脸={faceCount}, 点数={pointCount}, blendshapes={blendshapeCount}";
+    }
+
+    private static string SummarizeHand(
+      HandLandmarker task,
+      global::Mediapipe.Image image,
+      ImageProcessingOptions imageProcessingOptions,
+      VisionRunningMode runningMode,
+      long timestamp)
+    {
+      var result = HandLandmarkerResult.Alloc(2);
+      var detected = runningMode == VisionRunningMode.IMAGE
+        ? task.TryDetect(image, imageProcessingOptions, ref result)
+        : task.TryDetectForVideo(image, timestamp, imageProcessingOptions, ref result);
+      var handCount = result.handLandmarks?.Count ?? 0;
+      var pointCount = handCount > 0 ? result.handLandmarks[0].landmarks?.Count ?? 0 : 0;
+      return $"detected={detected}, 手={handCount}, 点数={pointCount}";
+    }
+
+    private static string SummarizeObjects(
+      ObjectDetector task,
+      global::Mediapipe.Image image,
+      ImageProcessingOptions imageProcessingOptions,
+      VisionRunningMode runningMode,
+      long timestamp)
+    {
+      var result = DetectionResult.Alloc(8);
+      var detected = runningMode == VisionRunningMode.IMAGE
+        ? task.TryDetect(image, imageProcessingOptions, ref result)
+        : task.TryDetectForVideo(image, timestamp, imageProcessingOptions, ref result);
+      var objectCount = result.detections?.Count ?? 0;
+      return $"detected={detected}, 物体={objectCount}, {FormatObjectLabels(result)}";
+    }
+
+    private static string FormatObjectLabels(DetectionResult result)
+    {
+      if (result.detections == null || result.detections.Count == 0)
+      {
+        return "labels=无";
+      }
+
+      var builder = new StringBuilder(128);
+      builder.Append("labels=");
+      var max = Mathf.Min(3, result.detections.Count);
+      for (var i = 0; i < max; i++)
+      {
+        if (i > 0)
+        {
+          builder.Append(", ");
+        }
+
+        var detection = result.detections[i];
+        if (detection.categories == null || detection.categories.Count == 0)
+        {
+          builder.Append("unknown");
+          continue;
+        }
+
+        var category = detection.categories[0];
+        var label = string.IsNullOrEmpty(category.displayName) ? category.categoryName : category.displayName;
+        builder.Append(string.IsNullOrEmpty(label) ? "unknown" : label);
+        builder.Append("(");
+        builder.Append(category.score.ToString("0.00"));
+        builder.Append(")");
+      }
+
+      return builder.ToString();
+    }
+
     private ImageProcessingOptions CreateImageProcessingOptions(out bool flipHorizontally, out bool flipVertically)
+    {
+      return CreateImageProcessingOptions(false, out flipHorizontally, out flipVertically, out _);
+    }
+
+    private ImageProcessingOptions CreateImageProcessingOptions(
+      bool mirrorHorizontally,
+      out bool flipHorizontally,
+      out bool flipVertically,
+      out int rotationDegrees)
     {
       var rotation = (global::Mediapipe.Unity.RotationAngle)NormalizeRotationDegrees(_webCamTexture.videoRotationAngle);
       var transformationOptions = ImageTransformationOptions.Build(
-        false,
+        mirrorHorizontally,
         _webCamTexture.videoVerticallyMirrored,
         rotation);
 
       flipHorizontally = transformationOptions.flipHorizontally;
       flipVertically = transformationOptions.flipVertically;
-      return new ImageProcessingOptions(rotationDegrees: (int)transformationOptions.rotationAngle);
+      rotationDegrees = (int)transformationOptions.rotationAngle;
+      return new ImageProcessingOptions(rotationDegrees: rotationDegrees);
     }
 
     private static int NormalizeRotationDegrees(int degrees)
@@ -480,6 +1128,38 @@ namespace SuperviseSoft.Mediapipe
         _ => 270
       };
     }
+
+    private WebCamDevice GetCurrentCameraDevice()
+    {
+      var devices = WebCamTexture.devices;
+      if (devices.Length == 0)
+      {
+        return default;
+      }
+
+      _selectedCameraIndex = Mathf.Clamp(_selectedCameraIndex, 0, devices.Length - 1);
+      return devices[_selectedCameraIndex];
+    }
+
+    private string GetCameraSummary()
+    {
+      var devices = WebCamTexture.devices;
+      if (devices.Length == 0)
+      {
+        return "相机：未找到设备";
+      }
+
+      var device = GetCurrentCameraDevice();
+      if (_webCamTexture == null)
+      {
+        return $"相机：#{_selectedCameraIndex} {device.name}，前置={device.isFrontFacing}，未启动，设备数={devices.Length}";
+      }
+
+      return $"相机：#{_selectedCameraIndex} {device.name}，前置={device.isFrontFacing}，{_webCamTexture.width}x{_webCamTexture.height}，旋转={_webCamTexture.videoRotationAngle}，竖向镜像={_webCamTexture.videoVerticallyMirrored}，设备数={devices.Length}";
+    }
+
+    private static long GetTimestampMillis()
+      => (long)(Time.realtimeSinceStartup * 1000);
 
     private void RefreshReport()
     {
@@ -508,7 +1188,11 @@ namespace SuperviseSoft.Mediapipe
       builder.AppendLine("【MediaPipe GPU 状态】");
       builder.AppendLine($"GpuManager.IsInitialized：{GpuManager.IsInitialized}");
       builder.AppendLine($"GpuResources：{(GpuManager.GpuResources == null ? "null" : "ready")}");
+      builder.AppendLine(GetCameraSummary());
+      builder.AppendLine($"Pose 模型绑定：{FormatModelBinding(poseModel)}");
       builder.AppendLine($"Face 模型绑定：{(faceModel == null ? "否" : $"{faceModel.name} ({faceModel.bytes.Length / 1024 / 1024} MB)")}");
+      builder.AppendLine($"Hand 模型绑定：{FormatModelBinding(handModel)}");
+      builder.AppendLine($"Object 模型绑定：{FormatModelBinding(objectModel)}");
       builder.AppendLine($"上次图像推理路径：{_lastInferencePath}");
       builder.AppendLine();
       builder.AppendLine("【上次危险步骤记录】");
@@ -525,20 +1209,25 @@ namespace SuperviseSoft.Mediapipe
       builder.AppendLine("4. 只在需要定位崩溃时点“危险: GPU初始化”。如果闪退，回来后看“上次危险步骤记录”。");
       builder.AppendLine("5. GPU 初始化成功后，再点“危险: GPU任务”。");
       builder.AppendLine("6. 最关键：点“CPU单帧推理”和“危险: GPU单帧”，看是否能真实跑过相机图像。");
+      builder.AppendLine("7. 切到前置相机后，依次点“CPU完整诊断”“GPU完整诊断”“GPU视频诊断”。如果 CPU 有人/脸而 GPU 没有，就是 GPU 链路问题；如果两者都没有，优先看相机旋转/镜像。");
+      builder.AppendLine("8. 如果前置相机无检测，点“GPU变换扫描”，看哪组 rotation/flip 能检测到。");
 
       _reportText.text = builder.ToString();
     }
+
+    private static string FormatModelBinding(TextAsset model)
+      => model == null ? "否" : $"{model.name} ({model.bytes.Length / 1024 / 1024} MB)";
 
     private static string GetImmediateConclusion()
     {
       if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Vulkan)
       {
-        return "当前是 Vulkan。实测 GPU 初始化和 GPU delegate 创建可能成功；主场景将优先用 GPU delegate + CPU 相机帧上传的安全模式，暂不在 Vulkan 下启用 GPU 纹理输入。";
+        return "当前是 Vulkan。若 GPU 初始化/任务创建成功但相机图像推理失败，优先怀疑图形后端共享纹理链路；建议切 OpenGLES3 后再测 GPU纹理输入。";
       }
 
       if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3)
       {
-        return "当前是 OpenGLES3，满足 MediaPipe Unity GPU 路径的基础条件。仍需测试 GpuManager.Initialize 和 GPU 任务创建。";
+        return "当前是 OpenGLES3。若 TestGPU 的 Face/Pose 能检出，说明手机 GPU 不是本质不支持；下一步看前置相机变换、VIDEO模式、或主场景生命周期。";
       }
 
       return "当前不是 Android 常用的 OpenGLES3/Vulkan 后端。此场景主要用于安卓真机 GPU 诊断。";
@@ -593,7 +1282,11 @@ namespace SuperviseSoft.Mediapipe
         return;
       }
 
-      var isPortrait = UnityEngine.Screen.height > UnityEngine.Screen.width;
+      var devicePortrait = Input.deviceOrientation == DeviceOrientation.Portrait ||
+                           Input.deviceOrientation == DeviceOrientation.PortraitUpsideDown;
+      var isPortrait = devicePortrait ||
+                       UnityEngine.Screen.height > UnityEngine.Screen.width ||
+                       _rootRect.rect.height > _rootRect.rect.width;
       if (!force && isPortrait == _lastPortraitLayout)
       {
         return;
@@ -604,9 +1297,9 @@ namespace SuperviseSoft.Mediapipe
       if (isPortrait)
       {
         Stretch(_titleRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -62f), new Vector2(-20f, -10f));
-        Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -274f), new Vector2(-20f, -70f));
-        Stretch(_reportPanelRect, new Vector2(0f, 0.28f), new Vector2(1f, 1f), new Vector2(20f, 10f), new Vector2(-20f, -284f));
-        Stretch(_previewPanelRect, Vector2.zero, new Vector2(1f, 0.28f), new Vector2(20f, 20f), new Vector2(-20f, -10f));
+        Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -356f), new Vector2(-20f, -70f));
+        Stretch(_reportPanelRect, new Vector2(0f, 0.28f), new Vector2(1f, 1f), new Vector2(20f, 10f), new Vector2(-20f, -366f));
+        Stretch(_previewPanelRect, Vector2.zero, new Vector2(1f, 0.28f), new Vector2(20f, 18f), new Vector2(-20f, -10f));
 
         var width = Mathf.Max(320f, _rootRect.rect.width);
         var cellWidth = Mathf.Max(128f, (width - 56f) * 0.5f);
@@ -617,14 +1310,14 @@ namespace SuperviseSoft.Mediapipe
       else
       {
         Stretch(_titleRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(24f, -58f), new Vector2(-24f, -12f));
-        Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -112f), new Vector2(-20f, -64f));
-        Stretch(_reportPanelRect, new Vector2(0f, 0f), new Vector2(0.62f, 1f), new Vector2(20f, 20f), new Vector2(-10f, -124f));
-        Stretch(_previewPanelRect, new Vector2(0.62f, 0f), Vector2.one, new Vector2(10f, 20f), new Vector2(-20f, -124f));
+        Stretch(_buttonBarRect, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(20f, -154f), new Vector2(-20f, -64f));
+        Stretch(_reportPanelRect, new Vector2(0f, 0f), new Vector2(0.62f, 1f), new Vector2(20f, 20f), new Vector2(-10f, -166f));
+        Stretch(_previewPanelRect, new Vector2(0.62f, 0f), Vector2.one, new Vector2(10f, 20f), new Vector2(-20f, -166f));
 
         var width = Mathf.Max(760f, _rootRect.rect.width);
-        var cellWidth = Mathf.Max(112f, (width - 96f) / 8f);
+        var cellWidth = Mathf.Max(112f, (width - 96f) / 6f);
         _buttonGrid.constraint = GridLayoutGroup.Constraint.FixedRowCount;
-        _buttonGrid.constraintCount = 1;
+        _buttonGrid.constraintCount = 2;
         _buttonGrid.cellSize = new Vector2(cellWidth, 38f);
       }
     }
@@ -640,8 +1333,8 @@ namespace SuperviseSoft.Mediapipe
       var rotation = _webCamTexture.videoRotationAngle;
       rect.localEulerAngles = new Vector3(0f, 0f, -rotation);
       _cameraPreview.uvRect = _webCamTexture.videoVerticallyMirrored
-        ? new Rect(0f, 1f, 1f, -1f)
-        : new Rect(0f, 0f, 1f, 1f);
+        ? new UnityEngine.Rect(0f, 1f, 1f, -1f)
+        : new UnityEngine.Rect(0f, 0f, 1f, 1f);
 
       if (_previewAspect != null && _webCamTexture.width > 16 && _webCamTexture.height > 16)
       {
