@@ -1453,8 +1453,8 @@ MonoBehaviour:
   upperBodyBaselineSeconds: 1.2
   upperBodyStandingYOffset: 0.12
   upperBodyStandingScaleBoost: 0.18
-  preferGpuDelegateOnAndroid: 0
-  useGpuTextureInputOnAndroid: 0
+  preferGpuDelegateOnAndroid: 1
+  useGpuTextureInputOnAndroid: 1
   cameraWarmupBeforeGpuSeconds: 0.35
   enableDeskAwarePosture: 1
   deskObjectsOverrideFullBodyPosture: 1

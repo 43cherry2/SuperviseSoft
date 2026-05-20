@@ -109,8 +109,8 @@ namespace SuperviseSoft.Mediapipe
     public float upperBodyBaselineSeconds = 1.2f;
     public float upperBodyStandingYOffset = 0.12f;
     public float upperBodyStandingScaleBoost = 0.18f;
-    public bool preferGpuDelegateOnAndroid = false;
-    public bool useGpuTextureInputOnAndroid = false;
+    public bool preferGpuDelegateOnAndroid = true;
+    public bool useGpuTextureInputOnAndroid = true;
     public float cameraWarmupBeforeGpuSeconds = 0.35f;
     public bool enableDeskAwarePosture = true;
     public bool deskObjectsOverrideFullBodyPosture = true;
