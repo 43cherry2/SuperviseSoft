@@ -75,7 +75,7 @@ namespace SuperviseSoft.UI
 
     public void Refresh()
     {
-      SetMessage("正在加载任务列表...");
+      SetMessage("正在加载进行中的任务组...");
       SetButtons(false);
       StartCoroutine(StudyTaskService.Instance.GetTaskList(response =>
       {
@@ -84,7 +84,7 @@ namespace SuperviseSoft.UI
         {
           _tasks = response.data.tasks ?? new StudyTask[0];
           RenderTasks();
-          SetMessage(_tasks.Length == 0 ? "暂无任务，请先创建一个学习任务。" : "任务列表已更新。");
+          SetMessage(_tasks.Length == 0 ? "暂无进行中的任务组，请先创建一个本次任务。" : "任务组列表已更新。");
           return;
         }
 
@@ -116,7 +116,7 @@ namespace SuperviseSoft.UI
 
       if (string.IsNullOrWhiteSpace(taskId))
       {
-        SetMessage("请输入任务 ID，或先创建任务。");
+        SetMessage("请输入任务 ID，或先创建任务组。");
         return;
       }
 
@@ -157,7 +157,7 @@ namespace SuperviseSoft.UI
 
       if (_tasks == null || _tasks.Length == 0)
       {
-        taskListText.text = "暂无任务";
+        taskListText.text = "暂无进行中的任务组";
         return;
       }
 
@@ -170,7 +170,7 @@ namespace SuperviseSoft.UI
           .Append(task.title)
           .Append(" | ")
           .Append(task.status)
-          .Append(" | ")
+          .Append(" | 预计 ")
           .Append(task.estimatedMinutes)
           .Append(" 分钟")
           .AppendLine();

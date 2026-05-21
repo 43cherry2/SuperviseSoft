@@ -10,23 +10,21 @@ exports.main = async (event, context) => {
   let job = null;
   let userId = "";
   let taskId = "";
-  let fileId = "";
 
   try {
     userId = await requireUserId(event, context);
     const body = readBody(event);
     taskId = String(body.taskId || "").trim();
-    fileId = String(body.fileId || "").trim();
+    const inputText = requireText(body.text);
     const task = await requireOwnedTask(userId, taskId);
-    const file = await requireOwnedFile(userId, task._id, fileId);
     const now = new Date().toISOString();
     const model = getProviderModel();
 
     job = {
       userId,
       taskId: task._id,
-      fileId: file._id,
-      inputType: "image",
+      fileId: "",
+      inputType: "text",
       status: "processing",
       model,
       errorMessage: "",
@@ -36,15 +34,15 @@ exports.main = async (event, context) => {
     const jobAdd = await db.collection("ai_jobs").add(job);
     job._id = jobAdd.id;
 
-    const ai = await analyzeWithProvider({ task, file, model });
+    const ai = await analyzeWithProvider({ task, inputText, model });
     const resultRecord = {
       userId,
       taskId: task._id,
-      fileId: file._id,
+      fileId: "",
       jobId: job._id,
-      inputType: "image",
-      inputText: "",
-      fileName: file.fileName,
+      inputType: "text",
+      inputText,
+      fileName: "",
       summary: ai.summary,
       estimatedMinutes: ai.estimatedMinutes,
       suggestedSteps: ai.suggestedSteps,
@@ -54,73 +52,51 @@ exports.main = async (event, context) => {
     const resultAdd = await db.collection("ai_results").add(resultRecord);
     resultRecord._id = resultAdd.id;
 
-    const successPatch = {
-      status: "success",
-      errorMessage: "",
-      updatedAt: new Date().toISOString(),
-    };
+    const successPatch = { status: "success", errorMessage: "", updatedAt: new Date().toISOString() };
     await db.collection("ai_jobs").doc(job._id).update(successPatch);
-    await writeUsageLog(userId, "ai_analyze_image", task._id, file._id, job._id, model, ai.tokenUsage || null);
-
-    return ok({
-      job: { ...job, ...successPatch },
-      result: resultRecord,
-    });
+    await writeUsageLog(userId, "ai_analyze_text", task._id, "", job._id, model, ai.tokenUsage || null);
+    return ok({ job: { ...job, ...successPatch }, result: resultRecord });
   } catch (error) {
-    const message = error.message || "AI 图片分析失败";
+    const message = error.message || "AI 文字分析失败";
     if (job && job._id) {
       await safeUpdateJobFailed(job._id, message);
-      await safeWriteUsageLog(userId, "ai_analyze_image", taskId, fileId, job._id, job.model || getProviderModel(), null);
+      await safeWriteUsageLog(userId, "ai_analyze_text", taskId, "", job._id, job.model || getProviderModel(), null);
     }
     return fail(error.code || 40001, message);
   }
 };
 
-async function analyzeWithProvider({ task, file, model }) {
+async function analyzeWithProvider({ task, inputText, model }) {
   if (!process.env.AI_API_KEY || !process.env.AI_API_URL) {
-    return mockAnalyze(task, file, model);
+    return mockAnalyze(task, inputText, model);
   }
-
-  return realAnalyze(task, file, model);
+  return realAnalyze(task, inputText, model);
 }
 
-function mockAnalyze(task, file, model) {
-  const estimatedMinutes = Math.max(20, Number(task.estimatedMinutes || 40));
+function mockAnalyze(task, inputText, model) {
+  const estimatedMinutes = Math.max(15, Math.min(90, Math.ceil(inputText.length / 25)));
   return {
-    summary: `已接收作业图片 ${file.fileName}。建议先完成基础题，再集中处理计算或综合题，最后预留时间检查漏题和错题。`,
+    summary: `已分析文字任务。内容重点是：${inputText.slice(0, 80)}${inputText.length > 80 ? "..." : ""}`,
     estimatedMinutes,
     suggestedSteps: [
-      { title: "完成基础题", minutes: 10, description: "先完成低难度题目，快速建立进度。" },
-      { title: "处理重点题", minutes: Math.max(10, estimatedMinutes - 20), description: "集中处理需要草稿、推导或长时间阅读的题目。" },
-      { title: "检查订正", minutes: 10, description: "检查漏题、单位、计算过程和最终答案。" },
+      { title: "拆分要求", minutes: 5, description: "先圈出题目要求、交付物和限制条件。" },
+      { title: "集中完成", minutes: Math.max(5, estimatedMinutes - 10), description: "按题目顺序完成主要内容，卡住的地方先标记。" },
+      { title: "检查修正", minutes: 5, description: "检查遗漏、错字、单位和答题格式。" },
     ],
-    rawResponse: {
-      provider: "MockAiProvider",
-      model,
-      storagePath: file.storagePath,
-    },
+    rawResponse: { provider: "MockAiProvider", model },
     tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
   };
 }
 
-async function realAnalyze(task, file, model) {
+async function realAnalyze(task, inputText, model) {
   const response = await fetch(process.env.AI_API_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.AI_API_KEY}`,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.AI_API_KEY}` },
     body: JSON.stringify({
       model,
       messages: [
-        {
-          role: "system",
-          content: "你是学习任务规划助手。请根据作业图片信息输出 JSON：summary、estimatedMinutes、suggestedSteps。",
-        },
-        {
-          role: "user",
-          content: `任务：${task.title}\n描述：${task.description || ""}\n图片文件：${file.fileName}\n云存储路径：${file.storagePath}`,
-        },
+        { role: "system", content: "你是学习任务规划助手。请根据文字任务输出 JSON：summary、estimatedMinutes、suggestedSteps。" },
+        { role: "user", content: `任务：${task.title}\n描述：${task.description || ""}\n文字内容：${inputText}` },
       ],
       temperature: 0.2,
     }),
@@ -131,9 +107,9 @@ async function realAnalyze(task, file, model) {
   const content = json.choices && json.choices[0] && json.choices[0].message ? json.choices[0].message.content : "";
   const parsed = safeParseAiJson(content);
   return {
-    summary: parsed.summary || content || "AI 已完成图片分析。",
-    estimatedMinutes: Number(parsed.estimatedMinutes || task.estimatedMinutes || 40),
-    suggestedSteps: Array.isArray(parsed.suggestedSteps) ? parsed.suggestedSteps : mockAnalyze(task, file, model).suggestedSteps,
+    summary: parsed.summary || content || "AI 已完成文字分析。",
+    estimatedMinutes: Number(parsed.estimatedMinutes || task.estimatedMinutes || 30),
+    suggestedSteps: Array.isArray(parsed.suggestedSteps) ? parsed.suggestedSteps : mockAnalyze(task, inputText, model).suggestedSteps,
     rawResponse: json,
     tokenUsage: json.usage || null,
   };
@@ -150,8 +126,15 @@ function safeParseAiJson(content) {
   }
 }
 
+function requireText(value) {
+  const text = String(value || "").trim();
+  if (!text) throw { code: 40003, message: "请输入要分析的文字" };
+  if (text.length > 4000) throw { code: 40004, message: "文字内容过长" };
+  return text;
+}
+
 function getProviderModel() {
-  if (!process.env.AI_API_KEY || !process.env.AI_API_URL) return "mock-study-image-v1";
+  if (!process.env.AI_API_KEY || !process.env.AI_API_URL) return "mock-study-text-v1";
   return process.env.AI_MODEL || "replaceable-study-model";
 }
 
@@ -163,45 +146,16 @@ async function requireOwnedTask(userId, taskId) {
   return result.data[0];
 }
 
-async function requireOwnedFile(userId, taskId, fileId) {
-  const id = String(fileId || "").trim();
-  if (!id) throw { code: 40004, message: "缺少文件 ID" };
-  const result = await db.collection("uploaded_files").where({ _id: id, userId, taskId, status: "uploaded" }).limit(1).get();
-  if (!result.data || result.data.length === 0) throw { code: 40402, message: "文件不存在或无权访问" };
-  return result.data[0];
-}
-
 async function writeUsageLog(userId, type, taskId, fileId, jobId, model, tokenUsage) {
-  await db.collection("usage_logs").add({
-    userId: userId || "",
-    type,
-    taskId: taskId || "",
-    fileId: fileId || "",
-    jobId: jobId || "",
-    model: model || "",
-    tokenUsage: tokenUsage || null,
-    createdAt: new Date().toISOString(),
-  });
+  await db.collection("usage_logs").add({ userId, type, taskId, fileId, jobId, model, tokenUsage: tokenUsage || null, createdAt: new Date().toISOString() });
 }
 
 async function safeWriteUsageLog(userId, type, taskId, fileId, jobId, model, tokenUsage) {
-  try {
-    await writeUsageLog(userId, type, taskId, fileId, jobId, model, tokenUsage);
-  } catch (_) {
-    // Do not hide the primary AI error with a logging failure.
-  }
+  try { await writeUsageLog(userId, type, taskId, fileId, jobId, model, tokenUsage); } catch (_) {}
 }
 
 async function safeUpdateJobFailed(jobId, message) {
-  try {
-    await db.collection("ai_jobs").doc(jobId).update({
-      status: "failed",
-      errorMessage: message,
-      updatedAt: new Date().toISOString(),
-    });
-  } catch (_) {
-    // Do not hide the primary AI error with a secondary update failure.
-  }
+  try { await db.collection("ai_jobs").doc(jobId).update({ status: "failed", errorMessage: message, updatedAt: new Date().toISOString() }); } catch (_) {}
 }
 
 async function requireUserId(event, context) {
@@ -216,12 +170,7 @@ async function requireUserId(event, context) {
 async function callAuthApi(context, event, path, method, data, authorization) {
   const response = await fetch(`${getAuthBaseUrl(context)}${path}`, {
     method,
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      "x-device-id": getHeader(event, "x-device-id") || "unity-device",
-      ...(authorization ? { Authorization: authorization } : {}),
-    },
+    headers: { "Content-Type": "application/json", Accept: "application/json", "x-device-id": getHeader(event, "x-device-id") || "unity-device", ...(authorization ? { Authorization: authorization } : {}) },
     body: method === "GET" ? undefined : JSON.stringify(data || {}),
   });
   const text = await response.text();

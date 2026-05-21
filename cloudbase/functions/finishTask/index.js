@@ -5,46 +5,108 @@ const app = cloudbase.init({
   env: process.env.CLOUDBASE_ENV_ID || process.env.TCB_ENV || cloudbase.SYMBOL_CURRENT_ENV,
 });
 const db = app.database();
-const MAX_BYTES = Number(process.env.UPLOAD_MAX_BYTES || 5 * 1024 * 1024);
 
 exports.main = async (event, context) => {
   try {
     const userId = await requireUserId(event, context);
     const body = readBody(event);
     const task = await requireOwnedTask(userId, body.taskId);
-    const fileType = requireImageType(body.fileType);
-    const fileName = sanitizeFileName(body.fileName, fileType);
-    const fileSize = Math.max(0, Number(body.fileSize || 0));
-    if (fileSize > MAX_BYTES) throw { code: 40007, message: "图片超过当前上传大小限制" };
+    const actualMinutes = Math.max(0, Math.floor(Number(body.actualMinutes || 0)));
 
-    const storagePath = `users/${userId}/tasks/${task._id}/${Date.now()}_${fileName}`;
-    const now = new Date().toISOString();
-    await db.collection("uploaded_files").add({
+    const results = await db.collection("ai_results").where({ userId, taskId: task._id }).limit(100).get();
+    const files = await db.collection("uploaded_files").where({ userId, taskId: task._id }).limit(100).get();
+    const aiResults = results.data || [];
+    const uploadedFiles = files.data || [];
+    const finishedAt = new Date().toISOString();
+    const summary = buildSummary(task, aiResults, actualMinutes, finishedAt);
+
+    await db.collection("usage_logs").add({
       userId,
+      type: "task_finish",
       taskId: task._id,
-      fileName,
-      fileType,
-      storagePath,
-      fileUrl: "",
-      cloudFileId: "",
-      status: "created",
-      fileSize,
-      createdAt: now,
-      updatedAt: now,
+      fileId: "",
+      jobId: "",
+      model: "",
+      tokenUsage: null,
+      summary: {
+        itemCount: summary.itemCount,
+        imageItemCount: summary.imageItemCount,
+        textItemCount: summary.textItemCount,
+        estimatedMinutes: summary.estimatedMinutes,
+        aiEstimatedMinutes: summary.aiEstimatedMinutes,
+        actualMinutes: summary.actualMinutes,
+        durationMinutes: summary.durationMinutes,
+      },
+      createdAt: finishedAt,
     });
 
-    return ok({
-      taskId: task._id,
-      fileName,
-      fileType,
-      storagePath,
-      uploadUrl: "/uploadFile",
-      maxBytes: MAX_BYTES,
-    });
+    await deleteCloudFiles(uploadedFiles);
+    await removeWhere("ai_results", { userId, taskId: task._id });
+    await removeWhere("ai_jobs", { userId, taskId: task._id });
+    await removeWhere("uploaded_files", { userId, taskId: task._id });
+    await db.collection("study_tasks").doc(task._id).remove();
+
+    return ok({ summary });
   } catch (error) {
-    return fail(error.code || 40001, error.message || "获取上传信息失败");
+    return fail(error.code || 40001, error.message || "结束本任务失败");
   }
 };
+
+function buildSummary(task, aiResults, actualMinutes, finishedAt) {
+  const imageItemCount = aiResults.filter(item => item.inputType === "image").length;
+  const textItemCount = aiResults.filter(item => item.inputType === "text").length;
+  const aiEstimatedMinutes = aiResults.reduce((sum, item) => sum + Math.max(0, Number(item.estimatedMinutes || 0)), 0);
+  const startedAt = task.createdAt || "";
+  return {
+    taskId: task._id,
+    title: task.title || "本次任务",
+    itemCount: aiResults.length,
+    imageItemCount,
+    textItemCount,
+    estimatedMinutes: Number(task.estimatedMinutes || 0),
+    aiEstimatedMinutes,
+    actualMinutes,
+    startedAt,
+    finishedAt,
+    durationMinutes: estimateDurationMinutes(startedAt, finishedAt),
+  };
+}
+
+function estimateDurationMinutes(startedAt, finishedAt) {
+  const start = Date.parse(startedAt);
+  const end = Date.parse(finishedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 0;
+  return Math.max(1, Math.round((end - start) / 60000));
+}
+
+async function deleteCloudFiles(uploadedFiles) {
+  const fileList = uploadedFiles
+    .map(file => file.cloudFileId || file.fileUrl)
+    .filter(value => value && /^cloud:\/\//.test(value));
+  if (fileList.length === 0) {
+    return;
+  }
+
+  try {
+    await app.deleteFile({ fileList });
+  } catch (_) {
+    // 数据库明细仍会清理；云存储删除失败时交给 CloudBase 控制台或后续定时清理兜底。
+  }
+}
+
+async function removeWhere(collectionName, where) {
+  try {
+    await db.collection(collectionName).where(where).remove();
+  } catch (_) {
+    const result = await db.collection(collectionName).where(where).limit(100).get();
+    const rows = result.data || [];
+    for (const row of rows) {
+      if (row._id) {
+        await db.collection(collectionName).doc(row._id).remove();
+      }
+    }
+  }
+}
 
 async function requireOwnedTask(userId, taskId) {
   const id = String(taskId || "").trim();
@@ -78,22 +140,6 @@ async function callAuthApi(context, event, path, method, data, authorization) {
   const json = text ? JSON.parse(text) : {};
   if (!response.ok || json.error || json.error_code) throw { code: json.error_code || response.status || 40001, message: json.error_description || json.message || json.error || response.statusText };
   return json;
-}
-
-function requireImageType(fileType) {
-  const value = String(fileType || "").toLowerCase();
-  if (value === "image/jpeg" || value === "image/jpg") return "image/jpeg";
-  if (value === "image/png") return "image/png";
-  throw { code: 40004, message: "只支持 JPG/PNG 图片" };
-}
-
-function sanitizeFileName(fileName, fileType) {
-  const fallback = fileType === "image/png" ? "study_image.png" : "study_image.jpg";
-  const raw = String(fileName || fallback).trim() || fallback;
-  const cleaned = raw.replace(/[^\w.\-\u4e00-\u9fa5]/g, "_").replace(/_+/g, "_").slice(0, 80);
-  const hasExtension = /\.(jpg|jpeg|png)$/i.test(cleaned);
-  if (hasExtension) return cleaned;
-  return `${cleaned}${fileType === "image/png" ? ".png" : ".jpg"}`;
 }
 
 function getAuthBaseUrl(context) {

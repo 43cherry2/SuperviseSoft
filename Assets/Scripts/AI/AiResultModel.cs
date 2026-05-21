@@ -18,6 +18,9 @@ namespace SuperviseSoft.AI
     public string taskId;
     public string fileId;
     public string jobId;
+    public string inputType;
+    public string inputText;
+    public string fileName;
     public string summary;
     public int estimatedMinutes;
     public SuggestedStep[] suggestedSteps;
@@ -30,5 +33,11 @@ namespace SuperviseSoft.AI
   {
     public AiJob job;
     public AiResult result;
+  }
+
+  public static class AiInputType
+  {
+    public const string Image = "image";
+    public const string Text = "text";
   }
 }

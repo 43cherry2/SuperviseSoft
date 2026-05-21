@@ -1,16 +1,26 @@
-# 第二轮：学习任务、图片上传、AI 分析
+# 第二轮：一次性学习任务组、图片/文字 AI 分析
+
+## 当前设计
+
+任务不是长期任务库，而是“一次性任务组”：
+
+1. Unity 创建一个本次任务组。
+2. 任务详情里可以输入文字让 AI 分析，也可以拖拽 JPG/PNG，或打开相机拍照后自动上传并分析。
+3. AI 结果按本次任务组一个一个展示，可上一项/下一项查看。
+4. 点击“结束本任务”后，云函数返回统计结果。
+5. 统计返回后，服务端删除本次任务组、上传文件记录、AI job、AI result，并尝试删除 CloudBase 云存储文件。
+6. `usage_logs` 只保留聚合统计，不保存题目文字、图片路径、AI 明细。
+
+保留任务/文件/AI 明细的旧版本已在 git 提交 `5b30fc0` 中快照，后续需要恢复可以从该提交找回。
 
 ## 手动开启能力
 
-1. CloudBase 身份认证继续保持开启。
-2. CloudBase 云数据库创建集合：`study_tasks`、`uploaded_files`、`ai_jobs`、`ai_results`、`usage_logs`。
-3. CloudBase 云存储保持可用。
-4. HTTP 访问服务里新增路由：`createTask`、`getTaskList`、`getTaskDetail`、`updateTaskStatus`、`getUploadInfo`、`uploadFile`、`confirmFileUploaded`、`analyzeHomeworkImage`、`getAiResult`。
-5. 如果接真实 AI，在 `analyzeHomeworkImage` 云函数环境变量配置：
-   - `AI_API_KEY`
-   - `AI_API_URL`
-   - `AI_MODEL`
-6. 未配置 `AI_API_KEY` 或 `AI_API_URL` 时，云函数会使用 `MockAiProvider` 跑通流程。
+1. CloudBase 身份认证继续开启。
+2. CloudBase 云数据库集合：`study_tasks`、`uploaded_files`、`ai_jobs`、`ai_results`、`usage_logs`。
+3. CloudBase 云存储可用。
+4. HTTP 路由：`createTask`、`getTaskList`、`getTaskDetail`、`updateTaskStatus`、`getUploadInfo`、`uploadFile`、`confirmFileUploaded`、`analyzeHomeworkImage`、`analyzeStudyText`、`getAiResult`、`finishTask`。
+5. 真实 AI 配置在云函数环境变量里：`AI_API_KEY`、`AI_API_URL`、`AI_MODEL`。
+6. 未配置真实 AI 时，云函数使用 MockAiProvider 跑通流程。
 
 ## 数据库集合
 
@@ -18,35 +28,33 @@
 
 字段：`_id`、`userId`、`title`、`description`、`estimatedMinutes`、`actualMinutes`、`status`、`createdAt`、`updatedAt`
 
-说明：
-- `userId` 必须来自 Authorization 登录态解析出的 `authUid`。
-- `status` 可选：`created`、`running`、`paused`、`finished`、`cancelled`。
+说明：`userId` 必须来自 Authorization 登录态。任务结束后该记录会被删除。
 
 ### uploaded_files
 
 字段：`_id`、`userId`、`taskId`、`fileName`、`fileType`、`storagePath`、`fileUrl`、`cloudFileId`、`status`、`fileSize`、`createdAt`、`updatedAt`
 
-说明：
-- `taskId` 必须属于当前 `userId`。
-- `storagePath` 由 `getUploadInfo` 生成，格式：`users/{userId}/tasks/{taskId}/{timestamp}_{fileName}`。
-- `status` 可选：`created`、`uploaded`、`deleted`。
-- 当前 MVP 额外保存 `cloudFileId`，用于记录 CloudBase 云存储返回的 fileID。
+说明：只作为任务进行中的临时上传记录。`finishTask` 会删除记录，并尝试删除云存储文件。
 
 ### ai_jobs
 
-字段：`_id`、`userId`、`taskId`、`fileId`、`status`、`model`、`errorMessage`、`createdAt`、`updatedAt`
+字段：`_id`、`userId`、`taskId`、`fileId`、`inputType`、`status`、`model`、`errorMessage`、`createdAt`、`updatedAt`
 
-`status` 可选：`pending`、`processing`、`success`、`failed`。
+`inputType`：`image` 或 `text`。任务结束后删除。
 
 ### ai_results
 
-字段：`_id`、`userId`、`taskId`、`fileId`、`jobId`、`summary`、`estimatedMinutes`、`suggestedSteps`、`rawResponse`、`createdAt`
+字段：`_id`、`userId`、`taskId`、`fileId`、`jobId`、`inputType`、`inputText`、`fileName`、`summary`、`estimatedMinutes`、`suggestedSteps`、`rawResponse`、`createdAt`
+
+任务结束后删除。文字内容只在任务进行中临时保存。
 
 ### usage_logs
 
-字段：`_id`、`userId`、`type`、`taskId`、`fileId`、`jobId`、`model`、`tokenUsage`、`createdAt`
+字段：`_id`、`userId`、`type`、`taskId`、`fileId`、`jobId`、`model`、`tokenUsage`、`summary`、`createdAt`
 
-## HTTP 接口示例
+`finishTask` 会写入一条 `type=task_finish` 的聚合统计，不保存图片路径、文字原文或 AI 明细。
+
+## 接口
 
 所有业务接口都需要：
 
@@ -57,16 +65,33 @@ Content-Type: application/json
 
 ### POST /createTask
 
-请求：
-
 ```json
 {
   "title": "数学作业",
-  "description": "完成第 3 页练习",
+  "description": "本次练习",
   "estimatedMinutes": 40
 }
 ```
 
+返回 `data.task`，状态默认为 `running`。
+
+### GET /getTaskList
+
+返回当前用户还没有结束的任务组。
+
+### GET /getTaskDetail?taskId=task_id
+
+返回任务组、已上传图片、AI jobs、AI results。Unity 详情页按 `aiResults` 一项一项展示。
+
+### POST /analyzeStudyText
+
+```json
+{
+  "taskId": "task_id",
+  "text": "完成第 3 页应用题，并整理错题原因"
+}
+```
+
 返回：
 
 ```json
@@ -75,61 +100,38 @@ Content-Type: application/json
   "code": 0,
   "message": "ok",
   "data": {
-    "task": {
-      "_id": "task_id",
-      "userId": "authUid",
-      "title": "数学作业",
-      "description": "完成第 3 页练习",
-      "estimatedMinutes": 40,
-      "actualMinutes": 0,
-      "status": "created",
-      "createdAt": "2026-05-21T00:00:00.000Z",
-      "updatedAt": "2026-05-21T00:00:00.000Z"
+    "job": { "_id": "job_id", "inputType": "text", "status": "success" },
+    "result": {
+      "_id": "result_id",
+      "inputType": "text",
+      "summary": "已分析文字任务...",
+      "estimatedMinutes": 30,
+      "suggestedSteps": []
     }
   }
 }
 ```
 
-### GET /getTaskList
+### 图片分析流程
 
-返回当前用户自己的任务：
+Unity 不再要求用户手填路径。
 
-```json
-{
-  "success": true,
-  "code": 0,
-  "message": "ok",
-  "data": {
-    "tasks": []
-  }
-}
-```
+1. 用户拖拽 JPG/PNG 到详情页拖拽区，或打开相机拍照。
+2. Unity 读取图片字节。
+3. Unity 调用 `getUploadInfo`。
+4. Unity 调用 `uploadFile` 上传到 CloudBase 云存储。
+5. Unity 调用 `confirmFileUploaded`。
+6. Unity 自动调用 `analyzeHomeworkImage`。
 
-### GET /getTaskDetail?taskId=task_id
-
-返回任务、已上传文件、AI 任务和最近 AI 结果。
-
-### POST /updateTaskStatus
+### POST /finishTask
 
 ```json
 {
   "taskId": "task_id",
-  "status": "finished",
   "actualMinutes": 38
 }
 ```
 
-### POST /getUploadInfo
-
-```json
-{
-  "taskId": "task_id",
-  "fileName": "homework.jpg",
-  "fileType": "image/jpeg",
-  "fileSize": 123456
-}
-```
-
 返回：
 
 ```json
@@ -138,110 +140,41 @@ Content-Type: application/json
   "code": 0,
   "message": "ok",
   "data": {
-    "taskId": "task_id",
-    "fileName": "homework.jpg",
-    "fileType": "image/jpeg",
-    "storagePath": "users/authUid/tasks/task_id/1779340800000_homework.jpg",
-    "uploadUrl": "/uploadFile",
-    "maxBytes": 5242880
-  }
-}
-```
-
-### POST /uploadFile
-
-这是 Unity HTTP 上传适配接口，Body 是 JPG/PNG 字节流，Header：
-
-```http
-x-task-id: task_id
-x-storage-path: users/authUid/tasks/task_id/1779340800000_homework.jpg
-x-file-type: image/jpeg
-```
-
-说明：该方式适合 MVP 和小文件。后期可替换成 Unity 客户端直传 CloudBase 云存储。
-
-### POST /confirmFileUploaded
-
-```json
-{
-  "taskId": "task_id",
-  "fileName": "homework.jpg",
-  "fileType": "image/jpeg",
-  "storagePath": "users/authUid/tasks/task_id/1779340800000_homework.jpg",
-  "fileId": "cloud://xxx",
-  "fileUrl": "",
-  "fileSize": 123456
-}
-```
-
-返回的 `data.file._id` 是后续 `analyzeHomeworkImage` 使用的 `fileId`。
-
-### POST /analyzeHomeworkImage
-
-```json
-{
-  "taskId": "task_id",
-  "fileId": "uploaded_files_record_id"
-}
-```
-
-返回：
-
-```json
-{
-  "success": true,
-  "code": 0,
-  "message": "ok",
-  "data": {
-    "job": {
-      "_id": "job_id",
-      "status": "success",
-      "model": "mock-homework-v1"
-    },
-    "result": {
-      "summary": "已读取作业图片，建议先完成基础题...",
+    "summary": {
+      "taskId": "task_id",
+      "title": "数学作业",
+      "itemCount": 3,
+      "imageItemCount": 2,
+      "textItemCount": 1,
       "estimatedMinutes": 40,
-      "suggestedSteps": [
-        {
-          "title": "完成选择题",
-          "minutes": 10,
-          "description": "先完成低难度题目，快速建立进度。"
-        }
-      ]
+      "aiEstimatedMinutes": 55,
+      "actualMinutes": 38,
+      "startedAt": "2026-05-21T00:00:00.000Z",
+      "finishedAt": "2026-05-21T00:38:00.000Z",
+      "durationMinutes": 38
     }
   }
 }
 ```
 
-### GET /getAiResult?jobId=job_id
+返回后服务端会清理本次任务明细。
 
-返回指定 AI job 的结果。`jobId` 必须属于当前登录用户。
+## Unity UI
 
-## Unity UI 绑定说明
+`TestSessage` 场景里直接包含第二轮 Panel，不靠运行时动态生成：
 
-新增脚本：
+- `TaskListPanel`：查看进行中的任务组、创建任务组、打开详情。
+- `CreateTaskPanel`：创建本次任务组，成功后直接进入详情。
+- `TaskDetailPanel`：文字分析、拖拽图片、打开相机、拍照并分析、上一项/下一项、结束本任务。
+- `AiResultPanel`：展示单项 AI 结果或结束统计。
 
-- `CreateTaskPanel`：绑定标题、描述、预计分钟数输入框，创建按钮，返回按钮。
-- `TaskListPanel`：绑定任务列表文本、任务 ID 输入框、刷新、创建、打开详情按钮。
-- `TaskDetailPanel`：绑定详情文本、状态按钮、本地图片路径输入框、上传按钮、AI 分析按钮。
-- `AiResultPanel`：绑定 AI 状态、summary、estimatedMinutes、suggestedSteps 文本和关闭按钮。
+拖拽图片说明：当前使用 Unity Editor 的 `UnityEditor.DragAndDrop` 接收外部图片拖拽，适合编辑器调试。打包到桌面运行时如果要继续支持系统级拖拽，需要后续接原生窗口拖拽插件。
 
-主页可选绑定：
+拍照说明：使用 `WebCamTexture`，需要设备有可用摄像头，并在平台权限中允许相机访问。
 
-- 在 `MainEntryPanel.openTaskListButton` 绑定一个“学习任务”按钮。
-- 在 `MainEntryPanel.taskListPanel` 绑定任务列表面板。
-
-隐藏面板建议继续使用 `CanvasGroup`，项目里的 `PanelVisibility` 会自动设置 `blocksRaycasts=false`，避免隐藏面板挡住按钮。
-
-## 部署步骤
-
-1. 在 CloudBase 控制台创建新增集合。
-2. 确认云存储可用。
-3. 如需真实 AI，给 `analyzeHomeworkImage` 配置环境变量 `AI_API_KEY`、`AI_API_URL`、`AI_MODEL`。
-4. 在 `cloudbase` 目录执行依赖安装和部署：
+## 部署
 
 ```bash
-cd cloudbase
 tcb fn deploy createTask
 tcb fn deploy getTaskList
 tcb fn deploy getTaskDetail
@@ -250,20 +183,21 @@ tcb fn deploy getUploadInfo
 tcb fn deploy uploadFile
 tcb fn deploy confirmFileUploaded
 tcb fn deploy analyzeHomeworkImage
+tcb fn deploy analyzeStudyText
 tcb fn deploy getAiResult
+tcb fn deploy finishTask
 ```
 
-5. 在 HTTP 访问服务配置对应路径。
+同时在 HTTP 访问服务里配置对应路径。
 
-## 测试步骤
+## 测试
 
-1. 未登录时调用 `CreateTaskPanel` 创建任务，应提示请先登录。
-2. 登录后创建任务，检查 `study_tasks.userId` 是当前 `authUid`。
-3. 刷新任务列表，只能看到当前账号任务。
-4. 打开任务详情，更新状态为 `running/paused/finished`。
-5. 在本地图片路径输入框填入 JPG/PNG 绝对路径，点击上传。
-6. 检查 `uploaded_files` 记录从 `created` 变为 `uploaded`。
-7. 点击 AI 分析。
-8. 检查 `ai_jobs` 为 `success`，`ai_results` 有结果，`usage_logs` 有记录。
-9. Unity 应展示 `summary`、`estimatedMinutes`、`suggestedSteps`。
-10. 换账号登录后，不应看到另一个账号的任务、文件或 AI 结果。
+1. 登录账号 A。
+2. 创建本次任务组。
+3. 输入一段文字，点击“分析文字”，确认出现一项 AI 结果。
+4. 拖拽一张 JPG/PNG 到拖拽区，确认自动上传并分析。
+5. 打开相机，拍照并分析。
+6. 用上一项/下一项查看本次任务组内结果。
+7. 点击“结束本任务”，确认 Unity 展示统计。
+8. 检查 `study_tasks`、`uploaded_files`、`ai_jobs`、`ai_results` 中本次任务明细被删除。
+9. 检查 `usage_logs` 有一条 `task_finish` 聚合日志。

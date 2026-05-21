@@ -9,6 +9,7 @@ namespace SuperviseSoft.AI
     public string userId;
     public string taskId;
     public string fileId;
+    public string inputType;
     public string status;
     public string model;
     public string errorMessage;
@@ -25,6 +26,20 @@ namespace SuperviseSoft.AI
 
   [Serializable]
   public class AnalyzeHomeworkImageResult
+  {
+    public AiJob job;
+    public AiResult result;
+  }
+
+  [Serializable]
+  public class AnalyzeStudyTextRequest
+  {
+    public string taskId;
+    public string text;
+  }
+
+  [Serializable]
+  public class AnalyzeStudyTextResult
   {
     public AiJob job;
     public AiResult result;

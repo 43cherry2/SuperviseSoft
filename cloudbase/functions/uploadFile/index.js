@@ -7,8 +7,8 @@ const app = cloudbase.init({
 const db = app.database();
 const MAX_BYTES = Number(process.env.UPLOAD_MAX_BYTES || 5 * 1024 * 1024);
 
-// MVP HTTP 上传适配层：Unity 上传图片字节流到本云函数，云函数再写入 CloudBase 云存储。
-// 适合第一版和小文件。后续如果 Unity 接入 CloudBase 官方存储直传能力，应替换为客户端直传。
+// MVP HTTP 上传适配层：Unity 把图片字节流上传到本云函数，云函数再写入 CloudBase 云存储。
+// 适合第一版和小文件。后续如 Unity 接入 CloudBase 官方存储直传能力，应替换为客户端直传。
 exports.main = async (event, context) => {
   try {
     const userId = await requireUserId(event, context);
@@ -110,7 +110,7 @@ function requireImageType(fileType) {
   const value = String(fileType || "").toLowerCase();
   if (value === "image/jpeg" || value === "image/jpg") return "image/jpeg";
   if (value === "image/png") return "image/png";
-  throw { code: 40004, message: "第一版只支持 JPG/PNG 图片" };
+  throw { code: 40004, message: "只支持 JPG/PNG 图片" };
 }
 
 function getAuthBaseUrl(context) {

@@ -12,10 +12,7 @@ exports.main = async (event, context) => {
     const jobId = getQuery(event, "jobId") || readBody(event).jobId;
     const job = await requireOwnedJob(userId, jobId);
     const results = await db.collection("ai_results").where({ userId, jobId: job._id }).limit(1).get();
-    return ok({
-      job,
-      result: results.data && results.data.length > 0 ? results.data[0] : null,
-    });
+    return ok({ job, result: results.data && results.data.length > 0 ? results.data[0] : null });
   } catch (error) {
     return fail(error.code || 40001, error.message || "获取 AI 结果失败");
   }

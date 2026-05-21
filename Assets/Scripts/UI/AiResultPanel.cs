@@ -1,5 +1,6 @@
 using System.Text;
 using SuperviseSoft.AI;
+using SuperviseSoft.Tasks;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -57,6 +58,24 @@ namespace SuperviseSoft.UI
       SetText(summaryText, result.summary);
       SetText(estimatedMinutesText, $"预计用时：{result.estimatedMinutes} 分钟");
       SetText(suggestedStepsText, BuildStepsText(result.suggestedSteps));
+    }
+
+    public void ShowFinishSummary(TaskFinishSummary summary)
+    {
+      PanelVisibility.Show(root, gameObject);
+      if (summary == null)
+      {
+        SetText(statusText, "本次任务已结束");
+        SetText(summaryText, "没有返回统计结果。");
+        SetText(estimatedMinutesText, string.Empty);
+        SetText(suggestedStepsText, string.Empty);
+        return;
+      }
+
+      SetText(statusText, "本次任务已结束，明细已清理");
+      SetText(summaryText, $"{summary.title}\n共分析 {summary.itemCount} 项：图片 {summary.imageItemCount} 项，文字 {summary.textItemCount} 项。");
+      SetText(estimatedMinutesText, $"AI 估算：{summary.aiEstimatedMinutes} 分钟 | 实际记录：{summary.actualMinutes} 分钟");
+      SetText(suggestedStepsText, $"开始：{summary.startedAt}\n结束：{summary.finishedAt}\n持续：{summary.durationMinutes} 分钟\n\n任务组、上传文件记录、AI 明细已从 CloudBase 清理。");
     }
 
     public void Hide()

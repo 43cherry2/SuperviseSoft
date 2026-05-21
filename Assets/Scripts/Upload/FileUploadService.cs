@@ -94,24 +94,16 @@ namespace SuperviseSoft.Upload
       Action<FileUploadProgress> onStatus,
       Action<ApiResponse<ConfirmFileUploadedResult>> onCompleted)
     {
-      if (!EnsureLoggedIn(onCompleted))
-      {
-        yield break;
-      }
-
-      Notify(onStatus, FileUploadPhase.Started, 0f, "开始读取图片");
-
       if (string.IsNullOrWhiteSpace(localPath) || !File.Exists(localPath))
       {
-        FailUpload(40003, "图片路径不存在", onStatus, onCompleted);
+        FailUpload(40003, "图片文件不存在", onStatus, onCompleted);
         yield break;
       }
 
-      var fileName = Path.GetFileName(localPath);
       var fileType = GetMimeType(localPath);
       if (string.IsNullOrWhiteSpace(fileType))
       {
-        FailUpload(40004, "第一版只支持 JPG/PNG 图片", onStatus, onCompleted);
+        FailUpload(40004, "只支持 JPG/PNG 图片", onStatus, onCompleted);
         yield break;
       }
 
@@ -125,6 +117,39 @@ namespace SuperviseSoft.Upload
         FailUpload(40005, $"读取图片失败：{exception.Message}", onStatus, onCompleted);
         yield break;
       }
+
+      yield return UploadImageBytesForTask(taskId, bytes, Path.GetFileName(localPath), fileType, onStatus, onCompleted);
+    }
+
+    public IEnumerator UploadImageBytesForTask(
+      string taskId,
+      byte[] bytes,
+      string fileName,
+      string fileType,
+      Action<FileUploadProgress> onStatus,
+      Action<ApiResponse<ConfirmFileUploadedResult>> onCompleted)
+    {
+      if (!EnsureLoggedIn(onCompleted))
+      {
+        yield break;
+      }
+
+      Notify(onStatus, FileUploadPhase.Started, 0f, "开始处理图片");
+
+      if (bytes == null || bytes.Length == 0)
+      {
+        FailUpload(40005, "图片内容为空", onStatus, onCompleted);
+        yield break;
+      }
+
+      fileType = NormalizeMimeType(fileType, fileName);
+      if (string.IsNullOrWhiteSpace(fileType))
+      {
+        FailUpload(40004, "只支持 JPG/PNG 图片", onStatus, onCompleted);
+        yield break;
+      }
+
+      fileName = NormalizeFileName(fileName, fileType);
 
       ApiResponse<UploadInfoResult> infoResponse = null;
       yield return GetUploadInfo(taskId, fileName, fileType, bytes.LongLength, response => infoResponse = response);
@@ -275,9 +300,25 @@ namespace SuperviseSoft.Upload
       });
     }
 
-    private static string GetMimeType(string path)
+    private static string NormalizeMimeType(string fileType, string fileName)
     {
-      var extension = Path.GetExtension(path)?.ToLowerInvariant();
+      var value = StringOrEmpty(fileType).ToLowerInvariant();
+      if (value == "image/jpeg" || value == "image/jpg")
+      {
+        return "image/jpeg";
+      }
+
+      if (value == "image/png")
+      {
+        return "image/png";
+      }
+
+      return GetMimeType(fileName);
+    }
+
+    private static string GetMimeType(string pathOrName)
+    {
+      var extension = Path.GetExtension(pathOrName)?.ToLowerInvariant();
       if (extension == ".jpg" || extension == ".jpeg")
       {
         return "image/jpeg";
@@ -289,6 +330,29 @@ namespace SuperviseSoft.Upload
       }
 
       return string.Empty;
+    }
+
+    private static string NormalizeFileName(string fileName, string fileType)
+    {
+      var fallback = fileType == "image/png" ? "study_image.png" : "study_image.jpg";
+      var value = StringOrEmpty(fileName).Trim();
+      if (string.IsNullOrWhiteSpace(value))
+      {
+        return fallback;
+      }
+
+      var extension = Path.GetExtension(value);
+      if (!string.IsNullOrWhiteSpace(extension))
+      {
+        return value;
+      }
+
+      return value + (fileType == "image/png" ? ".png" : ".jpg");
+    }
+
+    private static string StringOrEmpty(string value)
+    {
+      return value ?? string.Empty;
     }
   }
 }
