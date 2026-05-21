@@ -45,6 +45,18 @@ namespace SuperviseSoft.Mediapipe
       Squatting,
     }
 
+    private sealed class GpuImageBuildResult
+    {
+      public global::Mediapipe.Image image;
+      public string error;
+
+      public void Reset()
+      {
+        image = null;
+        error = null;
+      }
+    }
+
     [Serializable]
     public class FaceProfile
     {
@@ -344,58 +356,111 @@ namespace SuperviseSoft.Mediapipe
             continue;
           }
 
-          if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
-          {
-            _textureFrameMissCount++;
-            yield return waitForEndOfFrame;
-            continue;
-          }
-
           var imageProcessingOptions = CreateImageProcessingOptions(out var flipHorizontally, out var flipVertically);
           if (useGpuImageInput)
           {
-            Exception gpuException = null;
-            global::Mediapipe.Image inputImage = null;
-            try
+            var timestampMillisGpu = GetTimestampMillis();
+            var gpuImageBuild = new GpuImageBuildResult();
+            var poseDetectedGpu = false;
+            var faceDetectedGpu = false;
+            var handDetectedGpu = false;
+            var gpuFrameIssue = string.Empty;
+
+            yield return BuildGpuInputImage(glContext, flipHorizontally, flipVertically, waitForEndOfFrame, gpuImageBuild);
+            if (gpuImageBuild.image == null)
             {
-              textureFrame.ReadTextureOnGPU(_webCamTexture, flipHorizontally, flipVertically);
-              inputImage = textureFrame.BuildGPUImage(glContext);
+              gpuFrameIssue = $"Pose输入失败：{gpuImageBuild.error}";
             }
-            catch (Exception exception)
+            else
             {
-              gpuException = exception;
-            }
-
-            if (gpuException != null)
-            {
-              Debug.LogWarning($"[StudyMonitor] GPU texture input failed and will retry on GPU: {gpuException.Message}");
-              _inferenceStatusDetail = $"GPU 任务运行中，GPU纹理输入本帧失败，继续重试 GPU：{gpuException.Message}";
-              textureFrame.Release();
-              yield return WaitForNextDetection();
-              continue;
-            }
-
-            yield return waitForEndOfFrame;
-
-            try
-            {
-              var timestampMillisGpu = GetTimestampMillis();
-              var poseDetectedGpu = _poseLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _poseResult);
-              var faceDetectedGpu = _faceLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _faceResult);
-
-              var handDetectedGpu = false;
-              if (_handLandmarker != null)
+              try
               {
-                handDetectedGpu = _handLandmarker.TryDetectForVideo(inputImage, timestampMillisGpu, imageProcessingOptions, ref _handResult);
+                poseDetectedGpu = _poseLandmarker.TryDetectForVideo(
+                  gpuImageBuild.image,
+                  timestampMillisGpu++,
+                  imageProcessingOptions,
+                  ref _poseResult);
               }
+              catch (Exception exception)
+              {
+                Debug.LogWarning($"[StudyMonitor] GPU pose inference failed and will retry on GPU: {exception.Message}");
+                gpuFrameIssue = $"Pose推理异常：{exception.Message}";
+              }
+              finally
+              {
+                gpuImageBuild.image?.Dispose();
+              }
+            }
 
-              if (ShouldRunObjectDetection())
+            yield return BuildGpuInputImage(glContext, flipHorizontally, flipVertically, waitForEndOfFrame, gpuImageBuild);
+            if (gpuImageBuild.image == null)
+            {
+              gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Face输入失败：{gpuImageBuild.error}");
+            }
+            else
+            {
+              try
+              {
+                faceDetectedGpu = _faceLandmarker.TryDetectForVideo(
+                  gpuImageBuild.image,
+                  timestampMillisGpu++,
+                  imageProcessingOptions,
+                  ref _faceResult);
+              }
+              catch (Exception exception)
+              {
+                Debug.LogWarning($"[StudyMonitor] GPU face inference failed and will retry on GPU: {exception.Message}");
+                gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Face推理异常：{exception.Message}");
+              }
+              finally
+              {
+                gpuImageBuild.image?.Dispose();
+              }
+            }
+
+            if (_handLandmarker != null)
+            {
+              yield return BuildGpuInputImage(glContext, flipHorizontally, flipVertically, waitForEndOfFrame, gpuImageBuild);
+              if (gpuImageBuild.image == null)
+              {
+                gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Hand输入失败：{gpuImageBuild.error}");
+              }
+              else
+              {
+                try
+                {
+                  handDetectedGpu = _handLandmarker.TryDetectForVideo(
+                    gpuImageBuild.image,
+                    timestampMillisGpu++,
+                    imageProcessingOptions,
+                    ref _handResult);
+                }
+                catch (Exception exception)
+                {
+                  Debug.LogWarning($"[StudyMonitor] GPU hand inference failed and will retry on GPU: {exception.Message}");
+                  gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Hand推理异常：{exception.Message}");
+                }
+                finally
+                {
+                  gpuImageBuild.image?.Dispose();
+                }
+              }
+            }
+
+            if (ShouldRunObjectDetection())
+            {
+              yield return BuildGpuInputImage(glContext, flipHorizontally, flipVertically, waitForEndOfFrame, gpuImageBuild);
+              if (gpuImageBuild.image == null)
+              {
+                gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Object输入失败：{gpuImageBuild.error}");
+              }
+              else
               {
                 try
                 {
                   var objectDetected = _objectDetector.TryDetectForVideo(
-                    inputImage,
-                    timestampMillisGpu,
+                    gpuImageBuild.image,
+                    timestampMillisGpu++,
                     imageProcessingOptions,
                     ref _objectResult);
                   UpdateSceneObjectContext(objectDetected ? _objectResult : default);
@@ -403,27 +468,35 @@ namespace SuperviseSoft.Mediapipe
                 catch (Exception exception)
                 {
                   Debug.LogWarning($"[StudyMonitor] Object detection failed and was disabled: {exception.Message}");
+                  gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Object推理异常，已关闭物体检测：{exception.Message}");
                   _objectDetector?.Close();
                   _objectDetector = null;
                   ResetSceneObjectContext();
                 }
+                finally
+                {
+                  gpuImageBuild.image?.Dispose();
+                }
               }
+            }
 
-              AnalyzeResults(poseDetectedGpu, faceDetectedGpu, handDetectedGpu);
-              UpdateStatusUi();
-              DebugPoseEveryInterval();
-            }
-            catch (Exception exception)
-            {
-              Debug.LogWarning($"[StudyMonitor] GPU inference failed and will retry on GPU: {exception.Message}");
-              _inferenceStatusDetail = $"GPU 任务运行中，GPU推理本帧失败，继续重试 GPU：{exception.Message}";
-            }
-            finally
-            {
-              inputImage?.Dispose();
-            }
+            AnalyzeResults(poseDetectedGpu, faceDetectedGpu, handDetectedGpu);
+            _inferenceStatusDetail = string.IsNullOrEmpty(gpuFrameIssue)
+              ? "GPU 任务运行中，图像输入：逐任务GPU纹理输入"
+              : $"GPU 任务运行中，{gpuFrameIssue}";
+            UpdateStatusUi();
+            DebugPoseEveryInterval();
 
             yield return WaitForNextDetection();
+            continue;
+          }
+
+          if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
+          {
+            _textureFrameMissCount++;
+            _inferenceStatusDetail = $"{_activeDelegate} 任务运行中，帧池暂时无空闲：{_textureFrameMissCount}";
+            UpdateStatusUi();
+            yield return waitForEndOfFrame;
             continue;
           }
 
@@ -498,6 +571,44 @@ namespace SuperviseSoft.Mediapipe
       {
         yield return null;
       }
+    }
+
+    private IEnumerator BuildGpuInputImage(
+      global::Mediapipe.GlContext glContext,
+      bool flipHorizontally,
+      bool flipVertically,
+      WaitForEndOfFrame waitForEndOfFrame,
+      GpuImageBuildResult result)
+    {
+      result.Reset();
+
+      if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
+      {
+        _textureFrameMissCount++;
+        result.error = $"TextureFramePool 暂时没有空闲帧：{_textureFrameMissCount}";
+        yield return waitForEndOfFrame;
+        yield break;
+      }
+
+      try
+      {
+        textureFrame.ReadTextureOnGPU(_webCamTexture, flipHorizontally, flipVertically);
+        result.image = textureFrame.BuildGPUImage(glContext);
+      }
+      catch (Exception exception)
+      {
+        textureFrame.Release();
+        result.error = $"{exception.GetType().Name}: {exception.Message}";
+        Debug.LogWarning($"[StudyMonitor] GPU image build failed and will retry on GPU: {result.error}");
+        yield break;
+      }
+
+      yield return waitForEndOfFrame;
+    }
+
+    private static string AppendFrameIssue(string current, string next)
+    {
+      return string.IsNullOrEmpty(current) ? next : $"{current}；{next}";
     }
 
     private bool InitializeMediapipeTasks()
