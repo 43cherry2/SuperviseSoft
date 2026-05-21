@@ -290,7 +290,7 @@ namespace SuperviseSoft.Mediapipe
         yield break;
       }
 
-      _textureFramePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 4);
+      _textureFramePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 8);
 
       _poseResult = PoseLandmarkerResult.Alloc(1, false);
       _faceResult = FaceLandmarkerResult.Alloc(1, true, true);
@@ -407,7 +407,10 @@ namespace SuperviseSoft.Mediapipe
             {
               Debug.LogWarning($"[StudyMonitor] GPU inference failed and will retry on GPU: {exception.Message}");
               _inferenceStatusDetail = $"GPU 任务运行中，GPU推理本帧失败，继续重试 GPU：{exception.Message}";
-              textureFrame.Release();
+            }
+            finally
+            {
+              inputImage?.Dispose();
             }
 
             yield return WaitForNextDetection();
@@ -1014,7 +1017,7 @@ namespace SuperviseSoft.Mediapipe
       UpdateCameraPickerLabel(devices);
       RefreshCameraPickerList(false);
 
-      _textureFramePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 4);
+      _textureFramePool = new TextureFramePool(_webCamTexture.width, _webCamTexture.height, TextureFormat.RGBA32, 8);
       ResetUpperBodyBaseline();
       ResetHeadPitchBaseline();
 
