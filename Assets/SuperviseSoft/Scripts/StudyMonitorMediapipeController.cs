@@ -195,6 +195,15 @@ namespace SuperviseSoft.Mediapipe
     private float _unknownPostureSince = -1f;
     private string _currentIdentity = "未知";
     private string _lastError;
+    private string _lastInputTransformDetail = "无";
+    private long _processedFrameCount;
+    private int _textureFrameMissCount;
+    private bool _lastPoseDetected;
+    private bool _lastFaceDetected;
+    private bool _lastHandDetected;
+    private int _lastPoseLandmarkCount;
+    private int _lastFaceLandmarkCount;
+    private int _lastHandCount;
 
     private void Awake()
     {
@@ -337,6 +346,7 @@ namespace SuperviseSoft.Mediapipe
 
           if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
           {
+            _textureFrameMissCount++;
             yield return waitForEndOfFrame;
             continue;
           }
@@ -1398,13 +1408,16 @@ namespace SuperviseSoft.Mediapipe
     private ImageProcessingOptions CreateImageProcessingOptions(out bool flipHorizontally, out bool flipVertically)
     {
       var rotation = (global::Mediapipe.Unity.RotationAngle)NormalizeRotationDegrees(_webCamTexture.videoRotationAngle);
+      const bool mirrorModelInput = false;
       var transformationOptions = ImageTransformationOptions.Build(
-        mirrorCameraPreview,
+        mirrorModelInput,
         _webCamTexture.videoVerticallyMirrored,
         rotation);
 
       flipHorizontally = transformationOptions.flipHorizontally;
       flipVertically = transformationOptions.flipVertically;
+      _lastInputTransformDetail =
+        $"rotation={(int)transformationOptions.rotationAngle}, flipH={flipHorizontally}, flipV={flipVertically}, previewMirror={mirrorCameraPreview}";
       return new ImageProcessingOptions(rotationDegrees: (int)transformationOptions.rotationAngle);
     }
 
@@ -1471,6 +1484,14 @@ namespace SuperviseSoft.Mediapipe
       _readingObjectInFrame = false;
       _handLandmarkLists.Clear();
       _landmarkOverlay?.Clear();
+      _processedFrameCount = 0;
+      _textureFrameMissCount = 0;
+      _lastPoseDetected = false;
+      _lastFaceDetected = false;
+      _lastHandDetected = false;
+      _lastPoseLandmarkCount = 0;
+      _lastFaceLandmarkCount = 0;
+      _lastHandCount = 0;
       ResetUpperBodyBaseline();
       ResetHeadPitchBaseline();
     }
@@ -1480,6 +1501,14 @@ namespace SuperviseSoft.Mediapipe
       var poseLandmarks = GetPoseLandmarks(poseDetected);
       var faceLandmarks = GetFaceLandmarks(faceDetected);
       var handLandmarks = GetHandLandmarks(handDetected);
+
+      _processedFrameCount++;
+      _lastPoseDetected = poseDetected;
+      _lastFaceDetected = faceDetected;
+      _lastHandDetected = handDetected;
+      _lastPoseLandmarkCount = poseLandmarks?.Count ?? 0;
+      _lastFaceLandmarkCount = faceLandmarks?.Count ?? 0;
+      _lastHandCount = handLandmarks.Count;
 
       _poseInFrame = HasTrackedPose(poseLandmarks);
       _faceInFrame = HasTrackedFace(faceLandmarks);
@@ -2452,6 +2481,11 @@ namespace SuperviseSoft.Mediapipe
       var handCount = _handLandmarkLists.Count;
       var detectionMode = detectionIntervalSeconds <= 0f ? "逐帧实时" : $"{detectionIntervalSeconds:0.00}s/次";
       var inferenceDelegate = $"{_activeDelegate}（{_inferenceStatusDetail}）";
+      var latestInference =
+        $"帧={_processedFrameCount} 丢帧池={_textureFrameMissCount} " +
+        $"Pose={_lastPoseDetected}/{_lastPoseLandmarkCount} " +
+        $"Face={_lastFaceDetected}/{_lastFaceLandmarkCount} " +
+        $"Hand={_lastHandDetected}/{_lastHandCount}";
       var objectContext = enableDeskAwarePosture && _objectDetector != null ? _sceneObjectContext : "未启用";
       var upperBodyDebug = _upperBodyBaselineReady
         ? $"上移={_upperBodyMovedUp:0.00} 放大={_upperBodyScaleBoost:0.00}"
@@ -2487,6 +2521,8 @@ namespace SuperviseSoft.Mediapipe
           $"起立次数：{_standUpCount}\n" +
           $"相机数量：{cameraCount}\n" +
           $"推理后端：{inferenceDelegate}\n" +
+          $"最近推理：{latestInference}\n" +
+          $"输入变换：{_lastInputTransformDetail}\n" +
           $"检测频率：{detectionMode}\n" +
           $"已录入人数：{registeredFaces.Count}";
       }
