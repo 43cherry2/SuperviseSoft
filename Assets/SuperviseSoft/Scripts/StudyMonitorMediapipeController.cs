@@ -1,6 +1,8 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Text;
+using System.Text.RegularExpressions;
 using Mediapipe.Tasks.Core;
 using Mediapipe.Tasks.Vision.Core;
 using Mediapipe.Tasks.Vision.FaceLandmarker;
@@ -42,6 +44,21 @@ namespace SuperviseSoft.Mediapipe
       Sitting,
       Standing,
       Squatting,
+    }
+
+    private enum AppScreen
+    {
+      Home,
+      Monitor,
+      Planner,
+    }
+
+    private sealed class StudyTaskItem
+    {
+      public string title;
+      public float targetMinutes;
+      public float actualSeconds;
+      public bool completed;
     }
 
     [Serializable]
@@ -98,6 +115,10 @@ namespace SuperviseSoft.Mediapipe
     public float blinkMinimumClosedSeconds = 0.0f;
     public float blinkMaximumClosedSeconds = 0.6f;
     public float blinkCooldownSeconds = 0.18f;
+    public float drowsyBlinkThreshold = 0.55f;
+    public float asleepBlinkThreshold = 0.68f;
+    public float drowsyClosedSeconds = 1.2f;
+    public float asleepClosedSeconds = 3.0f;
     public float identityDistanceThreshold = 0.16f;
     public float postureStableSeconds = 0.8f;
     public float postureUnknownResetSeconds = 1.0f;
@@ -118,6 +139,11 @@ namespace SuperviseSoft.Mediapipe
     public float objectDetectionIntervalSeconds = 1.0f;
     public float objectDetectionScoreThreshold = 0.25f;
     public float handDeskEvidenceMinY = 0.52f;
+    public float writingGestureStableSeconds = 0.8f;
+    public float writingHandMinY = 0.52f;
+    public float writingPinchDistanceThreshold = 0.08f;
+    public float writingFingerClusterThreshold = 0.14f;
+    public bool writingRequiresHeadDown = true;
 
     [Header("Profiles")]
     public List<FaceProfile> registeredFaces = new();
@@ -154,6 +180,9 @@ namespace SuperviseSoft.Mediapipe
     private bool _poseInFrame;
     private bool _headDown;
     private bool _likelyReading;
+    private bool _suspectedWriting;
+    private bool _drowsy;
+    private bool _asleep;
     private bool _eyesClosed;
     private bool _eyesOpenObserved;
     private int _blinkCount;
@@ -161,7 +190,11 @@ namespace SuperviseSoft.Mediapipe
     private float _lastSeenTime = -999f;
     private float _lastBlinkTime = -999f;
     private float _eyesClosedSince = -1f;
+    private float _sleepEyeClosedSince = -1f;
+    private float _eyeClosedDuration;
     private float _lastBlinkScore = -1f;
+    private float _writingCandidateSince = -1f;
+    private float _writingGestureScore;
     private float _headPitchDegrees;
     private float _headDownPitchScore;
     private float _headPitchBaselineDegrees;
@@ -172,6 +205,8 @@ namespace SuperviseSoft.Mediapipe
     private float _headPitchBaselineSum;
     private int _headPitchBaselineSampleCount;
     private string _postureBasis = "无";
+    private string _writingBasis = "无";
+    private string _drowsinessBasis = "无";
     private string _sceneObjectContext = "无";
     private bool _deskLikeObjectInFrame;
     private bool _seatLikeObjectInFrame;
@@ -203,6 +238,23 @@ namespace SuperviseSoft.Mediapipe
     private int _lastPoseLandmarkCount;
     private int _lastFaceLandmarkCount;
     private int _lastHandCount;
+    private AppScreen _currentScreen = AppScreen.Home;
+    private RectTransform _homePanel;
+    private RectTransform _plannerPanel;
+    private RectTransform _taskRuntimePanel;
+    private InputField _homeworkInput;
+    private InputField _planMinutesInput;
+    private Text _plannerResultText;
+    private Text _taskRuntimeText;
+    private Button _markTaskDoneButton;
+    private Button _extendTaskButton;
+    private Button _openPlannerFromMonitorButton;
+    private readonly List<StudyTaskItem> _studyTasks = new();
+    private int _currentTaskIndex = -1;
+    private bool _taskTimerRunning;
+    private bool _taskTimeExpired;
+    private float _studySessionStartedAt = -1f;
+    private string _plannerSummary = "尚未生成学习计划。";
 
     private void Awake()
     {
@@ -223,12 +275,17 @@ namespace SuperviseSoft.Mediapipe
         enrollFaceButton.onClick.AddListener(EnrollCurrentFace);
       }
 
+      BuildStudyAppUi();
+      ShowHomeScreen();
       EnsureLandmarkOverlay();
     }
 
     private void OnEnable()
     {
-      _runCoroutine = StartCoroutine(Run());
+      if (_currentScreen == AppScreen.Monitor && _runCoroutine == null)
+      {
+        _runCoroutine = StartCoroutine(Run());
+      }
     }
 
     private void OnDisable()
@@ -252,7 +309,11 @@ namespace SuperviseSoft.Mediapipe
     private void Update()
     {
       ApplyResponsiveLayout(false);
-      UpdateCameraPreviewTransform();
+      UpdateTaskTimer();
+      if (_currentScreen == AppScreen.Monitor)
+      {
+        UpdateCameraPreviewTransform();
+      }
     }
 
     private IEnumerator Run()
@@ -584,6 +645,637 @@ namespace SuperviseSoft.Mediapipe
       {
         cameraView.texture = _webCamTexture;
       }
+    }
+
+    private void BuildStudyAppUi()
+    {
+      if (_homePanel != null)
+      {
+        return;
+      }
+
+      var canvas = ResolveCanvas();
+      if (canvas == null)
+      {
+        return;
+      }
+
+      var font = ResolveUiFont();
+      var canvasTransform = canvas.transform;
+
+      _homePanel = CreateRuntimePanel("Study Home Screen", canvasTransform, new Color(0.055f, 0.065f, 0.075f, 0.98f)).rectTransform;
+      Stretch(_homePanel, Vector2.zero, Vector2.one, Vector2.zero, Vector2.zero);
+
+      var homeTitle = CreateRuntimeText("Title", _homePanel, font, "学习监督", 38, TextAnchor.MiddleCenter, Color.white);
+      SetCenterRect(homeTitle.rectTransform, 0f, 520f, 72f);
+
+      var homeSubtitle = CreateRuntimeText(
+        "Subtitle",
+        _homePanel,
+        font,
+        "先分配任务，或者直接进入监测。",
+        20,
+        TextAnchor.MiddleCenter,
+        new Color(0.78f, 0.86f, 0.92f, 1f));
+      SetCenterRect(homeSubtitle.rectTransform, -58f, 720f, 40f);
+
+      var startButton = CreateRuntimeButton(
+        "Start Monitor Button",
+        _homePanel,
+        font,
+        "进入监测学习",
+        22,
+        () => ShowMonitorScreen());
+      SetCenterRect(startButton.GetComponent<RectTransform>(), -126f, 360f, 54f);
+
+      var plannerButton = CreateRuntimeButton(
+        "Open Planner Button",
+        _homePanel,
+        font,
+        "学习任务分配",
+        22,
+        () => ShowPlannerScreen());
+      SetCenterRect(plannerButton.GetComponent<RectTransform>(), -198f, 360f, 54f);
+
+      var tip = CreateRuntimeText(
+        "Tip",
+        _homePanel,
+        font,
+        "监测页会显示人物状态、骨架、闭眼程度、疑似写字和任务倒计时。",
+        16,
+        TextAnchor.MiddleCenter,
+        new Color(0.66f, 0.74f, 0.8f, 1f));
+      SetCenterRect(tip.rectTransform, -276f, 780f, 36f);
+
+      _plannerPanel = CreateRuntimePanel("Study Planner Screen", canvasTransform, new Color(0.05f, 0.06f, 0.07f, 0.98f)).rectTransform;
+      Stretch(_plannerPanel, Vector2.zero, Vector2.one, Vector2.zero, Vector2.zero);
+
+      var plannerTitle = CreateRuntimeText("Title", _plannerPanel, font, "学习任务分配", 32, TextAnchor.MiddleLeft, Color.white);
+      Stretch(plannerTitle.rectTransform, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(36f, -72f), new Vector2(-36f, -18f));
+
+      var inputLabel = CreateRuntimeText("Input Label", _plannerPanel, font, "今天要完成什么？", 18, TextAnchor.MiddleLeft, new Color(0.86f, 0.92f, 0.96f));
+      Stretch(inputLabel.rectTransform, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(36f, -118f), new Vector2(-36f, -86f));
+
+      _homeworkInput = CreateRuntimeInputField(
+        "Homework Input",
+        _plannerPanel,
+        font,
+        "例如：两张数学卷子，背英语单词30个，语文阅读2篇");
+      Stretch(_homeworkInput.GetComponent<RectTransform>(), new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(36f, -236f), new Vector2(-36f, -126f));
+
+      var estimateButton = CreateRuntimeButton("Estimate Plan Button", _plannerPanel, font, "生成参考计划", 18, GenerateStudyPlanFromInput);
+      SetTopLeftRect(estimateButton.GetComponent<RectTransform>(), 36f, 252f, 180f, 42f);
+
+      var confirmButton = CreateRuntimeButton("Confirm Plan Button", _plannerPanel, font, "确认并开始计时", 18, ConfirmPlanAndStart);
+      SetTopLeftRect(confirmButton.GetComponent<RectTransform>(), 232f, 252f, 190f, 42f);
+
+      var backButton = CreateRuntimeButton("Back Home Button", _plannerPanel, font, "返回首页", 18, ShowHomeScreen);
+      SetTopLeftRect(backButton.GetComponent<RectTransform>(), 438f, 252f, 140f, 42f);
+
+      var minutesLabel = CreateRuntimeText("Minutes Label", _plannerPanel, font, "目标总分钟", 16, TextAnchor.MiddleLeft, new Color(0.78f, 0.86f, 0.92f));
+      SetTopLeftRect(minutesLabel.rectTransform, 604f, 252f, 110f, 42f);
+
+      _planMinutesInput = CreateRuntimeInputField("Plan Minutes Input", _plannerPanel, font, "自动估算");
+      _planMinutesInput.lineType = InputField.LineType.SingleLine;
+      SetTopLeftRect(_planMinutesInput.GetComponent<RectTransform>(), 714f, 252f, 120f, 42f);
+
+      _plannerResultText = CreateRuntimeText(
+        "Planner Result",
+        _plannerPanel,
+        font,
+        _plannerSummary,
+        18,
+        TextAnchor.UpperLeft,
+        new Color(0.9f, 0.94f, 0.96f));
+      _plannerResultText.horizontalOverflow = HorizontalWrapMode.Wrap;
+      _plannerResultText.verticalOverflow = VerticalWrapMode.Overflow;
+      Stretch(_plannerResultText.rectTransform, Vector2.zero, Vector2.one, new Vector2(36f, 34f), new Vector2(-36f, -312f));
+
+      _taskRuntimePanel = CreateRuntimePanel("Study Task Runtime Panel", canvasTransform, new Color(0.035f, 0.045f, 0.055f, 0.92f)).rectTransform;
+      _taskRuntimeText = CreateRuntimeText("Task Runtime Text", _taskRuntimePanel, font, "未分配任务", 16, TextAnchor.MiddleLeft, Color.white);
+      _taskRuntimeText.horizontalOverflow = HorizontalWrapMode.Wrap;
+      Stretch(_taskRuntimeText.rectTransform, Vector2.zero, Vector2.one, new Vector2(12f, 6f), new Vector2(-340f, -6f));
+
+      _markTaskDoneButton = CreateRuntimeButton("Mark Task Done Button", _taskRuntimePanel, font, "完成当前", 15, CompleteCurrentTask);
+      SetRightMiddleRect(_markTaskDoneButton.GetComponent<RectTransform>(), 226f, 18f, 104f, 34f);
+
+      _extendTaskButton = CreateRuntimeButton("Extend Task Button", _taskRuntimePanel, font, "延时5分钟", 15, ExtendCurrentTask);
+      SetRightMiddleRect(_extendTaskButton.GetComponent<RectTransform>(), 116f, 18f, 104f, 34f);
+
+      _openPlannerFromMonitorButton = CreateRuntimeButton("Open Planner From Monitor Button", _taskRuntimePanel, font, "任务", 15, ShowPlannerScreen);
+      SetRightMiddleRect(_openPlannerFromMonitorButton.GetComponent<RectTransform>(), 12f, 18f, 96f, 34f);
+
+      _plannerPanel.gameObject.SetActive(false);
+      _taskRuntimePanel.gameObject.SetActive(false);
+    }
+
+    private void ShowHomeScreen()
+    {
+      _currentScreen = AppScreen.Home;
+      StopMonitoring();
+      _taskTimerRunning = false;
+      SetMonitoringUiVisible(false);
+      if (_homePanel != null)
+      {
+        _homePanel.gameObject.SetActive(true);
+      }
+      if (_plannerPanel != null)
+      {
+        _plannerPanel.gameObject.SetActive(false);
+      }
+      if (_taskRuntimePanel != null)
+      {
+        _taskRuntimePanel.gameObject.SetActive(false);
+      }
+    }
+
+    private void ShowPlannerScreen()
+    {
+      _currentScreen = AppScreen.Planner;
+      StopMonitoring();
+      SetMonitoringUiVisible(false);
+      if (_homePanel != null)
+      {
+        _homePanel.gameObject.SetActive(false);
+      }
+      if (_plannerPanel != null)
+      {
+        _plannerPanel.gameObject.SetActive(true);
+      }
+      if (_taskRuntimePanel != null)
+      {
+        _taskRuntimePanel.gameObject.SetActive(false);
+      }
+
+      RefreshPlannerUi();
+    }
+
+    private void ShowMonitorScreen()
+    {
+      _currentScreen = AppScreen.Monitor;
+      SetMonitoringUiVisible(true);
+      if (_homePanel != null)
+      {
+        _homePanel.gameObject.SetActive(false);
+      }
+      if (_plannerPanel != null)
+      {
+        _plannerPanel.gameObject.SetActive(false);
+      }
+      if (_taskRuntimePanel != null)
+      {
+        _taskRuntimePanel.gameObject.SetActive(true);
+      }
+
+      if (_runCoroutine == null)
+      {
+        _runCoroutine = StartCoroutine(Run());
+      }
+
+      ApplyResponsiveLayout(true);
+      UpdateTaskRuntimeUi();
+    }
+
+    private void StopMonitoring()
+    {
+      if (_cameraRestartCoroutine != null)
+      {
+        StopCoroutine(_cameraRestartCoroutine);
+        _cameraRestartCoroutine = null;
+      }
+
+      if (_runCoroutine != null)
+      {
+        StopCoroutine(_runCoroutine);
+        _runCoroutine = null;
+      }
+
+      DisposeMediapipe();
+      StopCamera();
+      ClearRuntimeTrackingState();
+      if (cameraView != null)
+      {
+        cameraView.texture = null;
+      }
+    }
+
+    private void SetMonitoringUiVisible(bool visible)
+    {
+      var canvas = ResolveCanvas();
+      var title = canvas != null ? canvas.transform.Find("Title") : null;
+      if (title != null)
+      {
+        title.gameObject.SetActive(visible);
+      }
+
+      SetObjectActive(showCameraToggle != null ? showCameraToggle.transform.parent : null, visible);
+      SetObjectActive(cameraView != null ? cameraView.rectTransform.parent : null, visible);
+      SetObjectActive(reportText != null ? reportText.transform.parent : null, visible);
+      SetObjectActive(bottomStatusText != null ? bottomStatusText.transform.parent : null, visible);
+    }
+
+    private static void SetObjectActive(Component component, bool active)
+    {
+      if (component != null)
+      {
+        component.gameObject.SetActive(active);
+      }
+    }
+
+    private static void SetObjectActive(Transform transform, bool active)
+    {
+      if (transform != null)
+      {
+        transform.gameObject.SetActive(active);
+      }
+    }
+
+    private void GenerateStudyPlanFromInput()
+    {
+      var description = _homeworkInput != null ? _homeworkInput.text : string.Empty;
+      BuildStudyPlan(description);
+      RefreshPlannerUi();
+    }
+
+    private void ConfirmPlanAndStart()
+    {
+      if (_studyTasks.Count == 0)
+      {
+        GenerateStudyPlanFromInput();
+      }
+
+      ApplyManualPlanTotalMinutes();
+      StartStudyPlanTimer();
+      ShowMonitorScreen();
+    }
+
+    private void BuildStudyPlan(string description)
+    {
+      _studyTasks.Clear();
+      _currentTaskIndex = -1;
+      _taskTimerRunning = false;
+      _taskTimeExpired = false;
+
+      if (string.IsNullOrWhiteSpace(description))
+      {
+        AddStudyTask("自由学习", 30f);
+      }
+      else
+      {
+        var parts = Regex.Split(description, @"[，,。；;\n\r]+");
+        foreach (var rawPart in parts)
+        {
+          var part = rawPart.Trim();
+          if (string.IsNullOrWhiteSpace(part))
+          {
+            continue;
+          }
+
+          AddEstimatedTasks(part);
+        }
+      }
+
+      if (_studyTasks.Count == 0)
+      {
+        AddStudyTask("自由学习", 30f);
+      }
+
+      _plannerSummary = BuildPlanSummary();
+      if (_planMinutesInput != null)
+      {
+        _planMinutesInput.text = Mathf.CeilToInt(GetTargetMinutes()).ToString();
+      }
+    }
+
+    private void AddEstimatedTasks(string description)
+    {
+      var quantity = Mathf.Max(1, ExtractQuantity(description));
+      var lower = description.ToLowerInvariant();
+
+      if (description.Contains("卷") || description.Contains("试卷") || description.Contains("套题"))
+      {
+        AddSplitTasks(description, quantity, 45f, "卷");
+        return;
+      }
+
+      if (description.Contains("阅读") || description.Contains("篇"))
+      {
+        AddSplitTasks(description, quantity, 15f, "篇");
+        return;
+      }
+
+      if (description.Contains("作文"))
+      {
+        AddStudyTask(description, Mathf.Max(35f, quantity * 35f));
+        return;
+      }
+
+      if (description.Contains("单词") || lower.Contains("word"))
+      {
+        var wordCount = Mathf.Max(quantity, ExtractLargestNumber(description));
+        var minutes = Mathf.Clamp(Mathf.Ceil(wordCount / 10f) * 5f, 10f, 60f);
+        AddStudyTask(description, minutes);
+        return;
+      }
+
+      if (description.Contains("背") || description.Contains("默写") || description.Contains("听写"))
+      {
+        AddStudyTask(description, Mathf.Max(20f, quantity * 15f));
+        return;
+      }
+
+      if (description.Contains("页") || description.Contains("题") || description.Contains("练习") || description.Contains("习题"))
+      {
+        AddStudyTask(description, Mathf.Clamp(quantity * 12f, 15f, 90f));
+        return;
+      }
+
+      AddStudyTask(description, Mathf.Clamp(quantity * 25f, 20f, 90f));
+    }
+
+    private void AddSplitTasks(string description, int quantity, float minutesPerItem, string unit)
+    {
+      if (quantity <= 1 || quantity > 5)
+      {
+        AddStudyTask(description, quantity * minutesPerItem);
+        return;
+      }
+
+      for (var i = 1; i <= quantity; i++)
+      {
+        AddStudyTask($"{description} - 第{i}{unit}", minutesPerItem);
+      }
+    }
+
+    private void AddStudyTask(string title, float targetMinutes)
+    {
+      _studyTasks.Add(new StudyTaskItem
+      {
+        title = title,
+        targetMinutes = Mathf.Max(1f, targetMinutes),
+        actualSeconds = 0f,
+        completed = false
+      });
+    }
+
+    private int ExtractQuantity(string text)
+    {
+      var number = ExtractLargestNumber(text);
+      if (number > 0)
+      {
+        return number;
+      }
+
+      var chineseNumbers = new Dictionary<char, int>
+      {
+        ['一'] = 1,
+        ['二'] = 2,
+        ['两'] = 2,
+        ['三'] = 3,
+        ['四'] = 4,
+        ['五'] = 5,
+        ['六'] = 6,
+        ['七'] = 7,
+        ['八'] = 8,
+        ['九'] = 9,
+        ['十'] = 10
+      };
+
+      foreach (var character in text)
+      {
+        if (chineseNumbers.TryGetValue(character, out var value))
+        {
+          return value;
+        }
+      }
+
+      return 1;
+    }
+
+    private static int ExtractLargestNumber(string text)
+    {
+      var best = 0;
+      foreach (Match match in Regex.Matches(text, @"\d+"))
+      {
+        if (int.TryParse(match.Value, out var value))
+        {
+          best = Mathf.Max(best, value);
+        }
+      }
+
+      return best;
+    }
+
+    private void ApplyManualPlanTotalMinutes()
+    {
+      if (_planMinutesInput == null ||
+          !float.TryParse(_planMinutesInput.text, out var totalMinutes) ||
+          totalMinutes <= 0f ||
+          _studyTasks.Count == 0)
+      {
+        return;
+      }
+
+      var currentTotal = GetTargetMinutes();
+      if (currentTotal <= 0.01f)
+      {
+        return;
+      }
+
+      var scale = totalMinutes / currentTotal;
+      foreach (var task in _studyTasks)
+      {
+        task.targetMinutes = Mathf.Max(1f, task.targetMinutes * scale);
+      }
+
+      _plannerSummary = BuildPlanSummary();
+    }
+
+    private void StartStudyPlanTimer()
+    {
+      if (_studyTasks.Count == 0)
+      {
+        return;
+      }
+
+      foreach (var task in _studyTasks)
+      {
+        task.actualSeconds = 0f;
+        task.completed = false;
+      }
+
+      _currentTaskIndex = 0;
+      _taskTimerRunning = true;
+      _taskTimeExpired = false;
+      _studySessionStartedAt = Time.unscaledTime;
+      UpdateTaskRuntimeUi();
+    }
+
+    private void CompleteCurrentTask()
+    {
+      var task = GetCurrentTask();
+      if (task == null)
+      {
+        return;
+      }
+
+      task.completed = true;
+      _taskTimeExpired = false;
+      MoveToNextTask();
+      UpdateTaskRuntimeUi();
+    }
+
+    private void ExtendCurrentTask()
+    {
+      var task = GetCurrentTask();
+      if (task == null)
+      {
+        return;
+      }
+
+      task.targetMinutes += 5f;
+      _taskTimeExpired = false;
+      UpdateTaskRuntimeUi();
+    }
+
+    private void MoveToNextTask()
+    {
+      for (var i = _currentTaskIndex + 1; i < _studyTasks.Count; i++)
+      {
+        if (!_studyTasks[i].completed)
+        {
+          _currentTaskIndex = i;
+          _taskTimerRunning = true;
+          return;
+        }
+      }
+
+      _taskTimerRunning = false;
+      _currentTaskIndex = -1;
+    }
+
+    private void UpdateTaskTimer()
+    {
+      if (!_taskTimerRunning || _currentScreen != AppScreen.Monitor)
+      {
+        return;
+      }
+
+      var task = GetCurrentTask();
+      if (task == null)
+      {
+        _taskTimerRunning = false;
+        UpdateTaskRuntimeUi();
+        return;
+      }
+
+      task.actualSeconds += Time.unscaledDeltaTime;
+      if (!_taskTimeExpired && task.actualSeconds >= task.targetMinutes * 60f)
+      {
+        _taskTimeExpired = true;
+      }
+
+      UpdateTaskRuntimeUi();
+    }
+
+    private StudyTaskItem GetCurrentTask()
+    {
+      if (_currentTaskIndex < 0 || _currentTaskIndex >= _studyTasks.Count)
+      {
+        return null;
+      }
+
+      return _studyTasks[_currentTaskIndex];
+    }
+
+    private float GetTargetMinutes()
+    {
+      var total = 0f;
+      foreach (var task in _studyTasks)
+      {
+        total += task.targetMinutes;
+      }
+
+      return total;
+    }
+
+    private float GetActualMinutes()
+    {
+      var totalSeconds = 0f;
+      foreach (var task in _studyTasks)
+      {
+        totalSeconds += task.actualSeconds;
+      }
+
+      return totalSeconds / 60f;
+    }
+
+    private string BuildPlanSummary()
+    {
+      if (_studyTasks.Count == 0)
+      {
+        return "尚未生成学习计划。";
+      }
+
+      var builder = new StringBuilder();
+      builder.AppendLine($"参考总时长：{Mathf.CeilToInt(GetTargetMinutes())} 分钟");
+      builder.AppendLine("拆分建议：");
+      for (var i = 0; i < _studyTasks.Count; i++)
+      {
+        var task = _studyTasks[i];
+        builder.AppendLine($"{i + 1}. {task.title}：约 {Mathf.CeilToInt(task.targetMinutes)} 分钟");
+      }
+
+      builder.AppendLine();
+      builder.AppendLine("估算依据：卷子约45分钟/张，阅读约15分钟/篇，单词按数量折算，其他练习按题量或默认任务块估算。后续可以继续加入科目、难度、孩子历史速度、截止时间、休息间隔、优先级这些数据。");
+      return builder.ToString();
+    }
+
+    private void RefreshPlannerUi()
+    {
+      if (_plannerResultText != null)
+      {
+        _plannerResultText.text = _plannerSummary;
+      }
+    }
+
+    private void UpdateTaskRuntimeUi()
+    {
+      if (_taskRuntimeText == null)
+      {
+        return;
+      }
+
+      var task = GetCurrentTask();
+      if (_studyTasks.Count == 0)
+      {
+        _taskRuntimeText.text = "任务：未分配    可进入“任务”生成计划";
+        return;
+      }
+
+      if (task == null)
+      {
+        _taskRuntimeText.text =
+          $"任务已完成    目标：{Mathf.CeilToInt(GetTargetMinutes())}分钟    实际：{Mathf.CeilToInt(GetActualMinutes())}分钟";
+        return;
+      }
+
+      var remainingSeconds = task.targetMinutes * 60f - task.actualSeconds;
+      var timing = remainingSeconds >= 0f
+        ? $"倒计时：{FormatDuration(remainingSeconds)}"
+        : $"已超时：{FormatDuration(-remainingSeconds)}";
+      var expired = _taskTimeExpired ? "    状态：可延时或完成" : string.Empty;
+      _taskRuntimeText.text =
+        $"当前任务 {(_currentTaskIndex + 1)}/{_studyTasks.Count}：{task.title}\n" +
+        $"{timing}{expired}    目标：{Mathf.CeilToInt(task.targetMinutes)}分钟    实际：{Mathf.CeilToInt(task.actualSeconds / 60f)}分钟    总实际：{Mathf.CeilToInt(GetActualMinutes())}分钟";
+    }
+
+    private static string FormatDuration(float seconds)
+    {
+      var totalSeconds = Mathf.Max(0, Mathf.CeilToInt(seconds));
+      var minutes = totalSeconds / 60;
+      var secs = totalSeconds % 60;
+      return $"{minutes:00}:{secs:00}";
     }
 
     private void BuildCameraPickerUi()
@@ -938,6 +1630,65 @@ namespace SuperviseSoft.Mediapipe
       }
     }
 
+    private UiImage CreateRuntimePanel(string name, Transform parent, Color color)
+    {
+      var gameObject = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(UiImage));
+      gameObject.transform.SetParent(parent, false);
+      var image = gameObject.GetComponent<UiImage>();
+      image.color = color;
+      return image;
+    }
+
+    private Button CreateRuntimeButton(
+      string name,
+      Transform parent,
+      Font font,
+      string label,
+      int fontSize,
+      UnityEngine.Events.UnityAction onClick)
+    {
+      var gameObject = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(UiImage), typeof(Button));
+      gameObject.transform.SetParent(parent, false);
+
+      var image = gameObject.GetComponent<UiImage>();
+      image.color = new Color(0.18f, 0.27f, 0.35f, 1f);
+
+      var button = gameObject.GetComponent<Button>();
+      button.targetGraphic = image;
+      button.onClick.AddListener(onClick);
+
+      var text = CreateRuntimeText("Label", gameObject.transform, font, label, fontSize, TextAnchor.MiddleCenter, Color.white);
+      Stretch(text.rectTransform, Vector2.zero, Vector2.one, new Vector2(8f, 0f), new Vector2(-8f, 0f));
+      text.horizontalOverflow = HorizontalWrapMode.Wrap;
+      return button;
+    }
+
+    private InputField CreateRuntimeInputField(string name, Transform parent, Font font, string placeholder)
+    {
+      var gameObject = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(UiImage), typeof(InputField));
+      gameObject.transform.SetParent(parent, false);
+
+      var background = gameObject.GetComponent<UiImage>();
+      background.color = new Color(0.11f, 0.14f, 0.17f, 1f);
+
+      var text = CreateRuntimeText("Text", gameObject.transform, font, string.Empty, 18, TextAnchor.UpperLeft, Color.white);
+      Stretch(text.rectTransform, Vector2.zero, Vector2.one, new Vector2(12f, 8f), new Vector2(-12f, -8f));
+      text.horizontalOverflow = HorizontalWrapMode.Wrap;
+      text.verticalOverflow = VerticalWrapMode.Overflow;
+
+      var placeholderText = CreateRuntimeText("Placeholder", gameObject.transform, font, placeholder, 18, TextAnchor.UpperLeft, new Color(0.55f, 0.62f, 0.68f, 1f));
+      Stretch(placeholderText.rectTransform, Vector2.zero, Vector2.one, new Vector2(12f, 8f), new Vector2(-12f, -8f));
+      placeholderText.horizontalOverflow = HorizontalWrapMode.Wrap;
+      placeholderText.verticalOverflow = VerticalWrapMode.Overflow;
+
+      var input = gameObject.GetComponent<InputField>();
+      input.targetGraphic = background;
+      input.textComponent = text;
+      input.placeholder = placeholderText;
+      input.lineType = InputField.LineType.MultiLineNewline;
+      return input;
+    }
+
     private Text CreateRuntimeText(string name, Transform parent, Font font, string text, int fontSize, TextAnchor alignment, Color color)
     {
       var gameObject = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Text));
@@ -1051,7 +1802,27 @@ namespace SuperviseSoft.Mediapipe
       _lastLayoutSafeArea = safeArea;
       _lastLayoutPortrait = isPortrait;
 
+      ApplyStudyAppLayout(canvasSize, safeLeft, safeRight, safeBottom, safeTop, isPortrait);
       UpdateCameraPreviewTransform();
+    }
+
+    private void ApplyStudyAppLayout(Vector2 canvasSize, float safeLeft, float safeRight, float safeBottom, float safeTop, bool isPortrait)
+    {
+      Stretch(_homePanel, Vector2.zero, Vector2.one, Vector2.zero, Vector2.zero);
+      Stretch(_plannerPanel, Vector2.zero, Vector2.one, Vector2.zero, Vector2.zero);
+
+      if (_taskRuntimePanel == null)
+      {
+        return;
+      }
+
+      var width = isPortrait
+        ? Mathf.Max(280f, canvasSize.x - safeLeft - safeRight - 24f)
+        : Mathf.Clamp(canvasSize.x * 0.56f, 520f, 760f);
+      var height = isPortrait ? 112f : 78f;
+      var left = safeLeft + (isPortrait ? 12f : 20f);
+      var bottom = safeBottom + (isPortrait ? 84f : 78f);
+      SetBottomLeftRect(_taskRuntimePanel, left, bottom, width, height);
     }
 
     private Canvas ResolveCanvas()
@@ -1224,6 +1995,48 @@ namespace SuperviseSoft.Mediapipe
       rectTransform.sizeDelta = new Vector2(width, height);
     }
 
+    private static void SetBottomLeftRect(RectTransform rectTransform, float left, float bottom, float width, float height)
+    {
+      if (rectTransform == null)
+      {
+        return;
+      }
+
+      rectTransform.anchorMin = new Vector2(0f, 0f);
+      rectTransform.anchorMax = new Vector2(0f, 0f);
+      rectTransform.pivot = new Vector2(0f, 0f);
+      rectTransform.anchoredPosition = new Vector2(left, bottom);
+      rectTransform.sizeDelta = new Vector2(width, height);
+    }
+
+    private static void SetCenterRect(RectTransform rectTransform, float y, float width, float height)
+    {
+      if (rectTransform == null)
+      {
+        return;
+      }
+
+      rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
+      rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
+      rectTransform.pivot = new Vector2(0.5f, 0.5f);
+      rectTransform.anchoredPosition = new Vector2(0f, y);
+      rectTransform.sizeDelta = new Vector2(width, height);
+    }
+
+    private static void SetRightMiddleRect(RectTransform rectTransform, float right, float y, float width, float height)
+    {
+      if (rectTransform == null)
+      {
+        return;
+      }
+
+      rectTransform.anchorMin = new Vector2(1f, 0.5f);
+      rectTransform.anchorMax = new Vector2(1f, 0.5f);
+      rectTransform.pivot = new Vector2(1f, 0.5f);
+      rectTransform.anchoredPosition = new Vector2(-right, y);
+      rectTransform.sizeDelta = new Vector2(width, height);
+    }
+
     private void EnsureLandmarkOverlay()
     {
       if (!showDebugLandmarks || cameraView == null)
@@ -1326,10 +2139,19 @@ namespace SuperviseSoft.Mediapipe
       _poseInFrame = false;
       _headDown = false;
       _likelyReading = false;
+      _suspectedWriting = false;
+      _drowsy = false;
+      _asleep = false;
+      _eyeClosedDuration = 0f;
+      _sleepEyeClosedSince = -1f;
+      _writingCandidateSince = -1f;
+      _writingGestureScore = 0f;
       _stablePosture = BodyPosture.Unknown;
       _lastSeenTime = -999f;
       _currentIdentity = "未知";
       _postureBasis = "无";
+      _writingBasis = "无";
+      _drowsinessBasis = "无";
       _sceneObjectContext = "无";
       _deskLikeObjectInFrame = false;
       _seatLikeObjectInFrame = false;
@@ -1373,6 +2195,7 @@ namespace SuperviseSoft.Mediapipe
       _personInFrame = Time.unscaledTime - _lastSeenTime <= absenceGraceSeconds;
       _headDown = _personInFrame && EstimateHeadDown(faceLandmarks, poseLandmarks);
       _stablePosture = UpdateStablePosture(EstimatePosture(poseLandmarks));
+      _suspectedWriting = UpdateWritingState(handLandmarks, poseLandmarks);
       _likelyReading = _personInFrame &&
         _headDown &&
         (_stablePosture != BodyPosture.Standing ||
@@ -1703,6 +2526,173 @@ namespace SuperviseSoft.Mediapipe
       }
 
       return false;
+    }
+
+    private bool UpdateWritingState(
+      IReadOnlyList<IReadOnlyList<TaskNormalizedLandmark>> handLandmarks,
+      IReadOnlyList<TaskNormalizedLandmark> poseLandmarks)
+    {
+      if (!_personInFrame ||
+          handLandmarks == null ||
+          handLandmarks.Count == 0 ||
+          !TryFindWritingGesture(handLandmarks, poseLandmarks, out _writingGestureScore, out _writingBasis))
+      {
+        _writingCandidateSince = -1f;
+        _writingGestureScore = 0f;
+        if (handLandmarks == null || handLandmarks.Count == 0)
+        {
+          _writingBasis = "未检测到手部";
+        }
+        return false;
+      }
+
+      var headOrDeskSupported =
+        !writingRequiresHeadDown ||
+        _headDown ||
+        _deskLikeObjectInFrame ||
+        _readingObjectInFrame ||
+        _seatLikeObjectInFrame;
+      if (!headOrDeskSupported && _writingGestureScore < 0.88f)
+      {
+        _writingCandidateSince = -1f;
+        _writingBasis += "，但没有低头/桌面证据";
+        return false;
+      }
+
+      if (_writingCandidateSince < 0f)
+      {
+        _writingCandidateSince = Time.unscaledTime;
+      }
+
+      return Time.unscaledTime - _writingCandidateSince >= writingGestureStableSeconds;
+    }
+
+    private bool TryFindWritingGesture(
+      IReadOnlyList<IReadOnlyList<TaskNormalizedLandmark>> hands,
+      IReadOnlyList<TaskNormalizedLandmark> poseLandmarks,
+      out float bestScore,
+      out string basis)
+    {
+      bestScore = 0f;
+      basis = "无";
+      var shoulderY = TryGetShoulderY(poseLandmarks, out var y) ? y : -1f;
+
+      foreach (var hand in hands)
+      {
+        if (hand == null || hand.Count <= 12)
+        {
+          continue;
+        }
+
+        if (!TryGetHandPoint(hand, 0, out var wrist) ||
+            !TryGetHandPoint(hand, 4, out var thumbTip) ||
+            !TryGetHandPoint(hand, 8, out var indexTip) ||
+            !TryGetHandPoint(hand, 12, out var middleTip))
+        {
+          continue;
+        }
+
+        var handCenterY = AverageHandY(hand);
+        var nearDesk = handCenterY >= writingHandMinY ||
+          (shoulderY >= 0f && handCenterY >= shoulderY + 0.12f);
+        var thumbIndexDistance = Vector2.Distance(thumbTip, indexTip);
+        var thumbMiddleDistance = Vector2.Distance(thumbTip, middleTip);
+        var indexMiddleDistance = Vector2.Distance(indexTip, middleTip);
+        var pinched = thumbIndexDistance <= writingPinchDistanceThreshold ||
+          thumbMiddleDistance <= writingPinchDistanceThreshold;
+        var clustered = Mathf.Max(thumbIndexDistance, Mathf.Max(thumbMiddleDistance, indexMiddleDistance)) <= writingFingerClusterThreshold;
+        var wristBelowFingers = wrist.y >= Mathf.Min(indexTip.y, middleTip.y) - 0.04f;
+
+        var score = 0f;
+        if (nearDesk)
+        {
+          score += 0.35f;
+        }
+
+        if (pinched)
+        {
+          score += 0.35f;
+        }
+
+        if (clustered)
+        {
+          score += 0.15f;
+        }
+
+        if (wristBelowFingers)
+        {
+          score += 0.08f;
+        }
+
+        if (_headDown)
+        {
+          score += 0.12f;
+        }
+
+        if (_deskLikeObjectInFrame || _readingObjectInFrame)
+        {
+          score += 0.08f;
+        }
+
+        if (score > bestScore)
+        {
+          bestScore = Mathf.Clamp01(score);
+          basis =
+            $"手在书写区域={YesNo(nearDesk)}，捏笔手势={YesNo(pinched || clustered)}，" +
+            $"手指距离={Mathf.Min(thumbIndexDistance, thumbMiddleDistance):0.00}，低头={YesNo(_headDown)}";
+        }
+      }
+
+      return bestScore >= 0.68f;
+    }
+
+    private bool TryGetHandPoint(IReadOnlyList<TaskNormalizedLandmark> hand, int index, out Vector2 point)
+    {
+      point = Vector2.zero;
+      if (index < 0 || index >= hand.Count || !IsPresent(hand[index]))
+      {
+        return false;
+      }
+
+      point = new Vector2(hand[index].x, hand[index].y);
+      return true;
+    }
+
+    private float AverageHandY(IReadOnlyList<TaskNormalizedLandmark> hand)
+    {
+      var sum = 0f;
+      var count = 0;
+      foreach (var landmark in hand)
+      {
+        if (!IsPresent(landmark))
+        {
+          continue;
+        }
+
+        sum += landmark.y;
+        count++;
+      }
+
+      return count > 0 ? sum / count : 0f;
+    }
+
+    private bool TryGetShoulderY(IReadOnlyList<TaskNormalizedLandmark> poseLandmarks, out float shoulderY)
+    {
+      shoulderY = 0f;
+      if (poseLandmarks == null || poseLandmarks.Count <= 12)
+      {
+        return false;
+      }
+
+      var hasLeft = IsVisible(poseLandmarks[11]);
+      var hasRight = IsVisible(poseLandmarks[12]);
+      if (!hasLeft && !hasRight)
+      {
+        return false;
+      }
+
+      shoulderY = AverageVisibleY(poseLandmarks[11], poseLandmarks[12]);
+      return true;
     }
 
     private BodyPosture EstimateUpperBodyPosture(IReadOnlyList<TaskNormalizedLandmark> landmarks)
@@ -2068,6 +3058,8 @@ namespace SuperviseSoft.Mediapipe
       var openNow = blinkScore <= blinkOpenThreshold ||
         (!closedNow && previousBlinkScore >= blinkThreshold && previousBlinkScore - blinkScore >= 0.08f);
 
+      UpdateDrowsinessState(now, minBlink, blinkScore, openNow);
+
       if (!_eyesOpenObserved)
       {
         _eyesOpenObserved = !closedNow || openNow;
@@ -2099,6 +3091,39 @@ namespace SuperviseSoft.Mediapipe
         _eyesOpenObserved = true;
         return;
       }
+    }
+
+    private void UpdateDrowsinessState(float now, float minBlink, float blinkScore, bool openNow)
+    {
+      var sustainedClosed =
+        blinkScore >= drowsyBlinkThreshold &&
+        minBlink >= drowsyBlinkThreshold * 0.55f;
+
+      if (!sustainedClosed || openNow)
+      {
+        _sleepEyeClosedSince = -1f;
+        _eyeClosedDuration = 0f;
+        _drowsy = false;
+        _asleep = false;
+        _drowsinessBasis = "眼睛已睁开或闭眼程度不足";
+        return;
+      }
+
+      if (_sleepEyeClosedSince < 0f)
+      {
+        _sleepEyeClosedSince = now;
+      }
+
+      _eyeClosedDuration = now - _sleepEyeClosedSince;
+      _drowsy = _eyeClosedDuration >= drowsyClosedSeconds;
+      _asleep =
+        _eyeClosedDuration >= asleepClosedSeconds &&
+        blinkScore >= asleepBlinkThreshold &&
+        minBlink >= asleepBlinkThreshold * 0.5f;
+      _drowsinessBasis =
+        $"闭眼程度={blinkScore:0.00}，持续={_eyeClosedDuration:0.0}s，" +
+        $"打瞌睡阈值={drowsyBlinkThreshold:0.00}/{drowsyClosedSeconds:0.0}s，" +
+        $"睡觉阈值={asleepBlinkThreshold:0.00}/{asleepClosedSeconds:0.0}s";
     }
 
     private bool TryGetBlinkScores(out float leftBlink, out float rightBlink, out float blinkScore)
@@ -2193,6 +3218,11 @@ namespace SuperviseSoft.Mediapipe
       _eyesClosed = false;
       _eyesOpenObserved = false;
       _eyesClosedSince = -1f;
+      _sleepEyeClosedSince = -1f;
+      _eyeClosedDuration = 0f;
+      _drowsy = false;
+      _asleep = false;
+      _drowsinessBasis = "无脸部闭眼数据";
       _lastBlinkScore = -1f;
     }
 
@@ -2323,12 +3353,19 @@ namespace SuperviseSoft.Mediapipe
     {
       var status = _personInFrame ? "画面中" : "未在画面中";
       var posture = ToChinese(_stablePosture);
-      var attention = _likelyReading ? "疑似看书/写字" : (_headDown ? "低头" : "看前方/未知");
+      var attention = _asleep
+        ? "疑似睡觉"
+        : (_drowsy
+          ? "打瞌睡"
+          : (_suspectedWriting
+            ? "疑似写字"
+            : (_likelyReading ? "疑似看书" : (_headDown ? "低头" : "看前方/未知"))));
       var face = _faceInFrame ? "检测到脸" : "未检测到脸";
       var headPitch = _hasHeadPitch ? $"{_headPitchDegrees:0.0}°" : "无";
       var headDownPitch = _hasHeadPitch ? $"{_headDownPitchScore:0.0}°" : "无";
       var headPitchBaseline = _headPitchBaselineReady ? $"{_headPitchBaselineDegrees:0.0}°" : "校准中";
       var blinkScore = _lastBlinkScore >= 0f ? _lastBlinkScore.ToString("0.00") : "无";
+      var eyeClosedDuration = _eyeClosedDuration > 0f ? $"{_eyeClosedDuration:0.0}s" : "无";
       var cameraCount = WebCamTexture.devices.Length;
       var handCount = _handLandmarkLists.Count;
       var detectionMode = detectionIntervalSeconds <= 0f ? "逐帧实时" : $"{detectionIntervalSeconds:0.00}s/次";
@@ -2366,9 +3403,15 @@ namespace SuperviseSoft.Mediapipe
           $"头部基准角：{headPitchBaseline}\n" +
           $"低头判断角：{headDownPitch}\n" +
           $"低头：{YesNo(_headDown)}\n" +
-          $"疑似看书/写字：{YesNo(_likelyReading)}\n" +
+          $"疑似看书：{YesNo(_likelyReading)}\n" +
+          $"疑似写字：{YesNo(_suspectedWriting)}\n" +
+          $"写字依据：{_writingBasis}\n" +
           $"手部数量：{handCount}\n" +
           $"闭眼程度：{blinkScore}\n" +
+          $"持续闭眼：{eyeClosedDuration}\n" +
+          $"打瞌睡：{YesNo(_drowsy)}\n" +
+          $"疑似睡觉：{YesNo(_asleep)}\n" +
+          $"睡意依据：{_drowsinessBasis}\n" +
           $"眨眼次数：{_blinkCount}\n" +
           $"起立次数：{_standUpCount}\n" +
           $"相机数量：{cameraCount}\n" +
