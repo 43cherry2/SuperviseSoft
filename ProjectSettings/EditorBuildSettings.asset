@@ -11,4 +11,7 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scenes/TestMediapipe.unity
     guid: 766f3321ff4ee5c458c96cea516e233e
+  - enabled: 1
+    path: Assets/Scenes/TestSessage.unity
+    guid: 8ad364dc13ef4b2192ce24fb72a83d4a
   m_configObjects: {}

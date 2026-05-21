@@ -1,0 +1,86 @@
+{
+  "envId": "study-ai-dev-d7gmxxwfhb8eed66d",
+  "functionRoot": "./functions",
+  "functions": [
+    {
+      "name": "sendSmsCode",
+      "timeout": 10,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "registerWithPhone",
+      "timeout": 15,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "loginWithSmsCode",
+      "timeout": 15,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "loginWithPassword",
+      "timeout": 15,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "resetPassword",
+      "timeout": 15,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "getCurrentUser",
+      "timeout": 10,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "logout",
+      "timeout": 10,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "createTask",
+      "timeout": 10,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "getTaskList",
+      "timeout": 10,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "getTaskDetail",
+      "timeout": 10,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "updateTaskStatus",
+      "timeout": 10,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "getUploadInfo",
+      "timeout": 10,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "uploadFile",
+      "timeout": 30,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "confirmFileUploaded",
+      "timeout": 10,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "analyzeHomeworkImage",
+      "timeout": 60,
+      "runtime": "Nodejs16.13"
+    },
+    {
+      "name": "getAiResult",
+      "timeout": 10,
+      "runtime": "Nodejs16.13"
+    }
+  ]
+}
