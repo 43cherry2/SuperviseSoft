@@ -95,13 +95,14 @@ namespace SuperviseSoft.Editor
       controller.requestedWidth = 640;
       controller.requestedHeight = 480;
       controller.detectionIntervalSeconds = 0f;
+      controller.mirrorLandmarksWithCameraPreview = true;
+      controller.mirrorLandmarksHorizontallyInEditor = true;
+      controller.mirrorLandmarksHorizontallyOnAndroid = false;
       controller.blinkThreshold = 0.22f;
       controller.blinkOpenThreshold = 0.2f;
       controller.blinkMinimumClosedSeconds = 0f;
       controller.invertHeadPitch = false;
       controller.invertHeadDownScoreOnAndroid = true;
-      controller.preferGpuDelegateOnAndroid = false;
-      controller.useGpuTextureInputOnAndroid = false;
       controller.enableDeskAwarePosture = true;
       controller.deskObjectsOverrideFullBodyPosture = true;
       controller.enableObjectDetectionPostureEvidence = true;

@@ -70,6 +70,8 @@ namespace SuperviseSoft.Mediapipe
     [SerializeField] private float _faceLineWidth = 1.3f;
     [SerializeField] private float _irisLineWidth = 1.5f;
     [SerializeField] private float _handLineWidth = 2.4f;
+    [SerializeField] private bool _mirrorHorizontally;
+    [SerializeField] private bool _mirrorVertically;
 
     private readonly List<Vector2> _posePoints = new();
     private readonly List<bool> _poseValid = new();
@@ -92,6 +94,18 @@ namespace SuperviseSoft.Mediapipe
       CopyLandmarks(poseLandmarks, _posePoints, _poseValid);
       CopyLandmarks(faceLandmarks, _facePoints, _faceValid);
       CopyHands(handLandmarks);
+      SetVerticesDirty();
+    }
+
+    public void SetMirror(bool mirrorHorizontally, bool mirrorVertically)
+    {
+      if (_mirrorHorizontally == mirrorHorizontally && _mirrorVertically == mirrorVertically)
+      {
+        return;
+      }
+
+      _mirrorHorizontally = mirrorHorizontally;
+      _mirrorVertically = mirrorVertically;
       SetVerticesDirty();
     }
 
@@ -143,13 +157,15 @@ namespace SuperviseSoft.Mediapipe
       for (var i = 0; i < source.Count; i++)
       {
         var landmark = source[i];
+        var x = _mirrorHorizontally ? 1f - landmark.x : landmark.x;
+        var y = _mirrorVertically ? 1f - landmark.y : landmark.y;
         var isValid = IsFinite(landmark.x) && IsFinite(landmark.y) &&
           landmark.x >= -0.5f && landmark.x <= 1.5f &&
           landmark.y >= -0.5f && landmark.y <= 1.5f;
 
         points.Add(new Vector2(
-          Mathf.LerpUnclamped(rect.xMin, rect.xMax, landmark.x),
-          Mathf.LerpUnclamped(rect.yMax, rect.yMin, landmark.y)));
+          Mathf.LerpUnclamped(rect.xMin, rect.xMax, x),
+          Mathf.LerpUnclamped(rect.yMax, rect.yMin, y)));
         valid.Add(isValid);
       }
     }

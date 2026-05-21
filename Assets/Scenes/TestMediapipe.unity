@@ -1423,6 +1423,9 @@ MonoBehaviour:
   requestedHeight: 480
   requestedFps: 30
   mirrorCameraPreview: 1
+  mirrorLandmarksWithCameraPreview: 1
+  mirrorLandmarksHorizontallyInEditor: 1
+  mirrorLandmarksHorizontallyOnAndroid: 0
   showDebugLandmarks: 1
   maxHands: 2
   bottomStatusText: {fileID: 14676560}
@@ -1453,9 +1456,6 @@ MonoBehaviour:
   upperBodyBaselineSeconds: 1.2
   upperBodyStandingYOffset: 0.12
   upperBodyStandingScaleBoost: 0.18
-  preferGpuDelegateOnAndroid: 1
-  useGpuTextureInputOnAndroid: 1
-  cameraWarmupBeforeGpuSeconds: 0.35
   enableDeskAwarePosture: 1
   deskObjectsOverrideFullBodyPosture: 1
   enableObjectDetectionPostureEvidence: 1

@@ -9,7 +9,6 @@ using Mediapipe.Tasks.Vision.ObjectDetector;
 using Mediapipe.Tasks.Vision.PoseLandmarker;
 using Mediapipe.Unity.Experimental;
 using UnityEngine;
-using UnityEngine.Rendering;
 using UnityEngine.UI;
 using ObjectDetectionResult = Mediapipe.Tasks.Components.Containers.DetectionResult;
 using TaskNormalizedLandmark = Mediapipe.Tasks.Components.Containers.NormalizedLandmark;
@@ -45,18 +44,6 @@ namespace SuperviseSoft.Mediapipe
       Squatting,
     }
 
-    private sealed class GpuImageBuildResult
-    {
-      public global::Mediapipe.Image image;
-      public string error;
-
-      public void Reset()
-      {
-        image = null;
-        error = null;
-      }
-    }
-
     [Serializable]
     public class FaceProfile
     {
@@ -85,6 +72,9 @@ namespace SuperviseSoft.Mediapipe
     public int requestedHeight = 480;
     public int requestedFps = 30;
     public bool mirrorCameraPreview = true;
+    public bool mirrorLandmarksWithCameraPreview = true;
+    public bool mirrorLandmarksHorizontallyInEditor = true;
+    public bool mirrorLandmarksHorizontallyOnAndroid = false;
 
     [Header("Debug View")]
     public bool showDebugLandmarks = true;
@@ -121,9 +111,6 @@ namespace SuperviseSoft.Mediapipe
     public float upperBodyBaselineSeconds = 1.2f;
     public float upperBodyStandingYOffset = 0.12f;
     public float upperBodyStandingScaleBoost = 0.18f;
-    public bool preferGpuDelegateOnAndroid = true;
-    public bool useGpuTextureInputOnAndroid = true;
-    public float cameraWarmupBeforeGpuSeconds = 0.35f;
     public bool enableDeskAwarePosture = true;
     public bool deskObjectsOverrideFullBodyPosture = true;
     public bool enableObjectDetectionPostureEvidence = true;
@@ -288,24 +275,6 @@ namespace SuperviseSoft.Mediapipe
       UpdateCameraPreviewTransform();
       ApplyCameraVisibility();
 
-      if (cameraWarmupBeforeGpuSeconds > 0f)
-      {
-        yield return new WaitForSeconds(cameraWarmupBeforeGpuSeconds);
-      }
-
-      if (ShouldPreferGpuDelegate())
-      {
-        SetStatus("相机已启动，正在初始化 GPU...");
-        yield return global::Mediapipe.Unity.GpuManager.Initialize();
-        _inferenceStatusDetail = global::Mediapipe.Unity.GpuManager.IsInitialized
-          ? $"GPU 初始化成功，图形后端：{SystemInfo.graphicsDeviceType}"
-          : $"GPU 初始化失败，图形后端：{SystemInfo.graphicsDeviceType}";
-      }
-      else if (preferGpuDelegateOnAndroid)
-      {
-        _inferenceStatusDetail = $"GPU 未启用：当前图形后端为 {SystemInfo.graphicsDeviceType}";
-      }
-
       if (!InitializeMediapipeTasks())
       {
         yield break;
@@ -323,205 +292,70 @@ namespace SuperviseSoft.Mediapipe
       SetStatus("检测已启动，等待人物进入画面...");
 
       var waitForEndOfFrame = new WaitForEndOfFrame();
-      var useGpuImageInput = CanUseGpuTextureInput();
-      var glContext = useGpuImageInput ? global::Mediapipe.Unity.GpuManager.GetGlContext() : null;
 
-      try
+      while (enabled)
       {
-        while (enabled)
+        if (_cameraSwitchPending)
         {
-          if (_cameraSwitchPending)
+          yield return SwitchCamera(_pendingCameraIndex);
+          if (!RecreateActiveMediapipeTasks())
           {
-            yield return SwitchCamera(_pendingCameraIndex);
-            if (!RecreateActiveMediapipeTasks())
-            {
-              yield break;
-            }
-
-            if (useGpuImageInput)
-            {
-              glContext?.Dispose();
-              glContext = global::Mediapipe.Unity.GpuManager.GetGlContext();
-              _inferenceStatusDetail = $"GPU 任务运行中，图像输入：GPU纹理输入，相机切换后已重建任务";
-            }
-
-            ResetUpperBodyBaseline();
-            ResetHeadPitchBaseline();
-            UpdateStatusUi();
+            yield break;
           }
 
-          if (_webCamTexture.width <= 16)
-          {
-            yield return null;
-            continue;
-          }
+          ResetUpperBodyBaseline();
+          ResetHeadPitchBaseline();
+          UpdateStatusUi();
+        }
 
-          var imageProcessingOptions = CreateImageProcessingOptions(out var flipHorizontally, out var flipVertically);
-          if (useGpuImageInput)
-          {
-            var timestampMillisGpu = GetTimestampMillis();
-            var gpuImageBuild = new GpuImageBuildResult();
-            var poseDetectedGpu = false;
-            var faceDetectedGpu = false;
-            var handDetectedGpu = false;
-            var gpuFrameIssue = string.Empty;
+        if (_webCamTexture.width <= 16)
+        {
+          yield return null;
+          continue;
+        }
 
-            yield return BuildGpuInputImage(glContext, flipHorizontally, flipVertically, waitForEndOfFrame, gpuImageBuild);
-            if (gpuImageBuild.image == null)
-            {
-              gpuFrameIssue = $"Pose输入失败：{gpuImageBuild.error}";
-            }
-            else
-            {
-              try
-              {
-                poseDetectedGpu = _poseLandmarker.TryDetectForVideo(
-                  gpuImageBuild.image,
-                  timestampMillisGpu++,
-                  imageProcessingOptions,
-                  ref _poseResult);
-              }
-              catch (Exception exception)
-              {
-                Debug.LogWarning($"[StudyMonitor] GPU pose inference failed and will retry on GPU: {exception.Message}");
-                gpuFrameIssue = $"Pose推理异常：{exception.Message}";
-              }
-              finally
-              {
-                gpuImageBuild.image?.Dispose();
-              }
-            }
+        var imageProcessingOptions = CreateImageProcessingOptions(out var flipHorizontally, out var flipVertically);
 
-            yield return BuildGpuInputImage(glContext, flipHorizontally, flipVertically, waitForEndOfFrame, gpuImageBuild);
-            if (gpuImageBuild.image == null)
-            {
-              gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Face输入失败：{gpuImageBuild.error}");
-            }
-            else
-            {
-              try
-              {
-                faceDetectedGpu = _faceLandmarker.TryDetectForVideo(
-                  gpuImageBuild.image,
-                  timestampMillisGpu++,
-                  imageProcessingOptions,
-                  ref _faceResult);
-              }
-              catch (Exception exception)
-              {
-                Debug.LogWarning($"[StudyMonitor] GPU face inference failed and will retry on GPU: {exception.Message}");
-                gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Face推理异常：{exception.Message}");
-              }
-              finally
-              {
-                gpuImageBuild.image?.Dispose();
-              }
-            }
+        if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
+        {
+          _textureFrameMissCount++;
+          _inferenceStatusDetail = $"{_activeDelegate} 任务运行中，帧池暂时无空闲：{_textureFrameMissCount}";
+          UpdateStatusUi();
+          yield return waitForEndOfFrame;
+          continue;
+        }
 
-            if (_handLandmarker != null)
-            {
-              yield return BuildGpuInputImage(glContext, flipHorizontally, flipVertically, waitForEndOfFrame, gpuImageBuild);
-              if (gpuImageBuild.image == null)
-              {
-                gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Hand输入失败：{gpuImageBuild.error}");
-              }
-              else
-              {
-                try
-                {
-                  handDetectedGpu = _handLandmarker.TryDetectForVideo(
-                    gpuImageBuild.image,
-                    timestampMillisGpu++,
-                    imageProcessingOptions,
-                    ref _handResult);
-                }
-                catch (Exception exception)
-                {
-                  Debug.LogWarning($"[StudyMonitor] GPU hand inference failed and will retry on GPU: {exception.Message}");
-                  gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Hand推理异常：{exception.Message}");
-                }
-                finally
-                {
-                  gpuImageBuild.image?.Dispose();
-                }
-              }
-            }
+        var request = textureFrame.ReadTextureAsync(_webCamTexture, flipHorizontally, flipVertically);
+        yield return new WaitUntil(() => request.done);
 
-            if (ShouldRunObjectDetection())
-            {
-              yield return BuildGpuInputImage(glContext, flipHorizontally, flipVertically, waitForEndOfFrame, gpuImageBuild);
-              if (gpuImageBuild.image == null)
-              {
-                gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Object输入失败：{gpuImageBuild.error}");
-              }
-              else
-              {
-                try
-                {
-                  var objectDetected = _objectDetector.TryDetectForVideo(
-                    gpuImageBuild.image,
-                    timestampMillisGpu++,
-                    imageProcessingOptions,
-                    ref _objectResult);
-                  UpdateSceneObjectContext(objectDetected ? _objectResult : default);
-                }
-                catch (Exception exception)
-                {
-                  Debug.LogWarning($"[StudyMonitor] Object detection failed and was disabled: {exception.Message}");
-                  gpuFrameIssue = AppendFrameIssue(gpuFrameIssue, $"Object推理异常，已关闭物体检测：{exception.Message}");
-                  _objectDetector?.Close();
-                  _objectDetector = null;
-                  ResetSceneObjectContext();
-                }
-                finally
-                {
-                  gpuImageBuild.image?.Dispose();
-                }
-              }
-            }
+        if (request.hasError)
+        {
+          textureFrame.Release();
+          Debug.LogWarning("[StudyMonitor] 摄像头画面读取失败，跳过本帧。");
+          yield return WaitForNextDetection();
+          continue;
+        }
 
-            AnalyzeResults(poseDetectedGpu, faceDetectedGpu, handDetectedGpu);
-            _inferenceStatusDetail = string.IsNullOrEmpty(gpuFrameIssue)
-              ? "GPU 任务运行中，图像输入：逐任务GPU纹理输入"
-              : $"GPU 任务运行中，{gpuFrameIssue}";
-            UpdateStatusUi();
-            DebugPoseEveryInterval();
+        var timestampMillis = GetTimestampMillis();
+        global::Mediapipe.Image poseImage = null;
+        global::Mediapipe.Image faceImage = null;
+        global::Mediapipe.Image handImage = null;
+        global::Mediapipe.Image objectImage = null;
+        var poseDetected = false;
+        var faceDetected = false;
+        var handDetected = false;
 
-            yield return WaitForNextDetection();
-            continue;
-          }
+        try
+        {
+          poseImage = textureFrame.BuildCPUImage();
+          poseDetected = _poseLandmarker.TryDetectForVideo(poseImage, timestampMillis, imageProcessingOptions, ref _poseResult);
 
-          if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
-          {
-            _textureFrameMissCount++;
-            _inferenceStatusDetail = $"{_activeDelegate} 任务运行中，帧池暂时无空闲：{_textureFrameMissCount}";
-            UpdateStatusUi();
-            yield return waitForEndOfFrame;
-            continue;
-          }
+          faceImage = textureFrame.BuildCPUImage();
+          faceDetected = _faceLandmarker.TryDetectForVideo(faceImage, timestampMillis, imageProcessingOptions, ref _faceResult);
 
-          var request = textureFrame.ReadTextureAsync(_webCamTexture, flipHorizontally, flipVertically);
-          yield return new WaitUntil(() => request.done);
-
-          if (request.hasError)
-          {
-            textureFrame.Release();
-            Debug.LogWarning("[StudyMonitor] 摄像头画面读取失败，跳过本帧。");
-            yield return WaitForNextDetection();
-            continue;
-          }
-
-          var timestampMillis = GetTimestampMillis();
-          var poseImage = textureFrame.BuildCPUImage();
-          var poseDetected = _poseLandmarker.TryDetectForVideo(poseImage, timestampMillis, imageProcessingOptions, ref _poseResult);
-
-          var faceImage = textureFrame.BuildCPUImage();
-          var faceDetected = _faceLandmarker.TryDetectForVideo(faceImage, timestampMillis, imageProcessingOptions, ref _faceResult);
-
-          var handDetected = false;
           if (_handLandmarker != null)
           {
-            var handImage = textureFrame.BuildCPUImage();
+            handImage = textureFrame.BuildCPUImage();
             handDetected = _handLandmarker.TryDetectForVideo(handImage, timestampMillis, imageProcessingOptions, ref _handResult);
           }
 
@@ -529,7 +363,7 @@ namespace SuperviseSoft.Mediapipe
           {
             try
             {
-              var objectImage = textureFrame.BuildCPUImage();
+              objectImage = textureFrame.BuildCPUImage();
               var objectDetected = _objectDetector.TryDetectForVideo(
                 objectImage,
                 timestampMillis,
@@ -545,19 +379,21 @@ namespace SuperviseSoft.Mediapipe
               ResetSceneObjectContext();
             }
           }
-
-          textureFrame.Release();
-
-          AnalyzeResults(poseDetected, faceDetected, handDetected);
-          UpdateStatusUi();
-          DebugPoseEveryInterval();
-
-          yield return WaitForNextDetection();
         }
-      }
-      finally
-      {
-        glContext?.Dispose();
+        finally
+        {
+          poseImage?.Dispose();
+          faceImage?.Dispose();
+          handImage?.Dispose();
+          objectImage?.Dispose();
+          textureFrame.Release();
+        }
+
+        AnalyzeResults(poseDetected, faceDetected, handDetected);
+        UpdateStatusUi();
+        DebugPoseEveryInterval();
+
+        yield return WaitForNextDetection();
       }
     }
 
@@ -571,44 +407,6 @@ namespace SuperviseSoft.Mediapipe
       {
         yield return null;
       }
-    }
-
-    private IEnumerator BuildGpuInputImage(
-      global::Mediapipe.GlContext glContext,
-      bool flipHorizontally,
-      bool flipVertically,
-      WaitForEndOfFrame waitForEndOfFrame,
-      GpuImageBuildResult result)
-    {
-      result.Reset();
-
-      if (!_textureFramePool.TryGetTextureFrame(out var textureFrame))
-      {
-        _textureFrameMissCount++;
-        result.error = $"TextureFramePool 暂时没有空闲帧：{_textureFrameMissCount}";
-        yield return waitForEndOfFrame;
-        yield break;
-      }
-
-      try
-      {
-        textureFrame.ReadTextureOnGPU(_webCamTexture, flipHorizontally, flipVertically);
-        result.image = textureFrame.BuildGPUImage(glContext);
-      }
-      catch (Exception exception)
-      {
-        textureFrame.Release();
-        result.error = $"{exception.GetType().Name}: {exception.Message}";
-        Debug.LogWarning($"[StudyMonitor] GPU image build failed and will retry on GPU: {result.error}");
-        yield break;
-      }
-
-      yield return waitForEndOfFrame;
-    }
-
-    private static string AppendFrameIssue(string current, string next)
-    {
-      return string.IsNullOrEmpty(current) ? next : $"{current}；{next}";
     }
 
     private bool InitializeMediapipeTasks()
@@ -644,32 +442,11 @@ namespace SuperviseSoft.Mediapipe
           _isMediapipeInitialized = true;
         }
 
-        var preferredDelegate = ShouldPreferGpuDelegate() &&
-                                global::Mediapipe.Unity.GpuManager.IsInitialized
-          ? BaseOptions.Delegate.GPU
-          : BaseOptions.Delegate.CPU;
-
-        if (TryCreateMediapipeTasks(preferredDelegate, out var creationError))
+        if (TryCreateMediapipeTasks(out var creationError))
         {
-          _activeDelegate = preferredDelegate;
-          if (preferredDelegate == BaseOptions.Delegate.GPU)
-          {
-            var inputMode = CanUseGpuTextureInput() ? "GPU纹理输入" : "CPU相机帧上传";
-            _inferenceStatusDetail = $"GPU 任务创建成功，图形后端：{SystemInfo.graphicsDeviceType}，图像输入：{inputMode}";
-          }
+          _activeDelegate = BaseOptions.Delegate.CPU;
+          _inferenceStatusDetail = "CPU 任务运行中";
           return true;
-        }
-
-        if (preferredDelegate != BaseOptions.Delegate.CPU)
-        {
-          Debug.LogWarning($"[StudyMonitor] GPU delegate failed, falling back to CPU: {creationError}");
-          _inferenceStatusDetail = $"GPU 任务创建失败，已回退 CPU：{creationError}";
-          DisposeTaskApis();
-          if (TryCreateMediapipeTasks(BaseOptions.Delegate.CPU, out creationError))
-          {
-            _activeDelegate = BaseOptions.Delegate.CPU;
-            return true;
-          }
         }
 
         SetError($"MediaPipe 初始化失败：{creationError}");
@@ -683,13 +460,11 @@ namespace SuperviseSoft.Mediapipe
       }
     }
 
-    private bool TryCreateMediapipeTasks(BaseOptions.Delegate delegateCase, out string error)
+    private bool TryCreateMediapipeTasks(out string error)
     {
       error = null;
       var runningMode = RunningMode.VIDEO;
-      var gpuResources = delegateCase == BaseOptions.Delegate.GPU
-        ? global::Mediapipe.Unity.GpuManager.GpuResources
-        : null;
+      const BaseOptions.Delegate delegateCase = BaseOptions.Delegate.CPU;
 
       try
       {
@@ -735,15 +510,15 @@ namespace SuperviseSoft.Mediapipe
             categoryAllowList: PostureObjectAllowList);
         }
 
-        _poseLandmarker = PoseLandmarker.CreateFromOptions(poseOptions, gpuResources);
-        _faceLandmarker = FaceLandmarker.CreateFromOptions(faceOptions, gpuResources);
-        _handLandmarker = handOptions == null ? null : HandLandmarker.CreateFromOptions(handOptions, gpuResources);
+        _poseLandmarker = PoseLandmarker.CreateFromOptions(poseOptions);
+        _faceLandmarker = FaceLandmarker.CreateFromOptions(faceOptions);
+        _handLandmarker = handOptions == null ? null : HandLandmarker.CreateFromOptions(handOptions);
         _objectDetector = null;
         if (objectOptions != null)
         {
           try
           {
-            _objectDetector = ObjectDetector.CreateFromOptions(objectOptions, gpuResources);
+            _objectDetector = ObjectDetector.CreateFromOptions(objectOptions);
           }
           catch (Exception exception)
           {
@@ -765,51 +540,22 @@ namespace SuperviseSoft.Mediapipe
 
     private bool RecreateActiveMediapipeTasks()
     {
-      var activeDelegate = _activeDelegate;
       DisposeTaskApis();
 
-      if (!TryCreateMediapipeTasks(activeDelegate, out var error))
+      if (!TryCreateMediapipeTasks(out var error))
       {
         SetError($"相机切换后重建 MediaPipe 任务失败：{error}");
         return false;
       }
 
-      _activeDelegate = activeDelegate;
-      if (_activeDelegate == BaseOptions.Delegate.GPU)
-      {
-        _inferenceStatusDetail = $"GPU 任务已随相机切换重建，图形后端：{SystemInfo.graphicsDeviceType}，图像输入：GPU纹理输入";
-      }
-      else
-      {
-        _inferenceStatusDetail = $"CPU 任务已随相机切换重建";
-      }
+      _activeDelegate = BaseOptions.Delegate.CPU;
+      _inferenceStatusDetail = "CPU 任务已随相机切换重建";
 
       _poseResult = PoseLandmarkerResult.Alloc(1, false);
       _faceResult = FaceLandmarkerResult.Alloc(1, true, true);
       _handResult = HandLandmarkerResult.Alloc(Mathf.Max(1, maxHands));
       _objectResult = ObjectDetectionResult.Alloc(8);
       return true;
-    }
-
-    private bool ShouldPreferGpuDelegate()
-    {
-#if UNITY_ANDROID && !UNITY_EDITOR
-      return preferGpuDelegateOnAndroid;
-#else
-      return false;
-#endif
-    }
-
-    private bool CanUseGpuTextureInput()
-    {
-#if UNITY_ANDROID && !UNITY_EDITOR
-      return useGpuTextureInputOnAndroid &&
-             _activeDelegate == BaseOptions.Delegate.GPU &&
-             SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3 &&
-             global::Mediapipe.Unity.GpuManager.GpuResources != null;
-#else
-      return false;
-#endif
     }
 
     private IEnumerator StartCamera()
@@ -1045,7 +791,7 @@ namespace SuperviseSoft.Mediapipe
       _currentCameraIndex = index;
       _pendingCameraIndex = index;
       _cameraSwitchPending = false;
-      SetStatus("正在切换相机并重启 GPU 检测...");
+      SetStatus("正在切换相机并重启检测...");
       UpdateCameraPickerLabel(devices);
       RefreshCameraPickerList(false);
 
@@ -1081,7 +827,7 @@ namespace SuperviseSoft.Mediapipe
       DisposeMediapipe();
       StopCamera();
       ClearRuntimeTrackingState();
-      SetStatus($"正在打开相机并重启 GPU：{BuildCameraOptionLabel(devices[index], index, false)}");
+      SetStatus($"正在打开相机并重启检测：{BuildCameraOptionLabel(devices[index], index, false)}");
 
       yield return null;
       yield return null;
@@ -1552,11 +1298,6 @@ namespace SuperviseSoft.Mediapipe
       DisposeTaskApis();
       _textureFramePool?.Dispose();
       _textureFramePool = null;
-
-      if (global::Mediapipe.Unity.GpuManager.IsInitialized)
-      {
-        global::Mediapipe.Unity.GpuManager.Shutdown();
-      }
 
       if (_isMediapipeInitialized)
       {
@@ -2702,7 +2443,32 @@ namespace SuperviseSoft.Mediapipe
       if (_landmarkOverlay != null)
       {
         _landmarkOverlay.rectTransform.localScale = Vector3.one;
+        var mirrorOverlayHorizontally = ShouldMirrorLandmarksHorizontallyByPlatform();
+        var mirrorOverlayVertically = false;
+        if (mirrorCameraPreview && mirrorLandmarksWithCameraPreview)
+        {
+          if (rotation == global::Mediapipe.Unity.RotationAngle.Rotation0 ||
+              rotation == global::Mediapipe.Unity.RotationAngle.Rotation180)
+          {
+            mirrorOverlayHorizontally = true;
+          }
+          else
+          {
+            mirrorOverlayVertically = true;
+          }
+        }
+
+        _landmarkOverlay.SetMirror(mirrorOverlayHorizontally, mirrorOverlayVertically);
       }
+    }
+
+    private bool ShouldMirrorLandmarksHorizontallyByPlatform()
+    {
+#if UNITY_ANDROID && !UNITY_EDITOR
+      return mirrorLandmarksHorizontallyOnAndroid;
+#else
+      return mirrorLandmarksHorizontallyInEditor;
+#endif
     }
 
     private void FitCameraViewToParent(global::Mediapipe.Unity.RotationAngle rotation)
