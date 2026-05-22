@@ -66,7 +66,7 @@ namespace SuperviseSoft.Tasks
       yield return CloudApiClient.Instance.PostJson<CreateTaskRequest, CreateTaskResult>(
         "/createTask",
         request,
-        response => Complete(response, onCompleted, "创建本次任务失败"));
+        response => Complete(response, onCompleted, "创建学习任务失败"));
     }
 
     public IEnumerator GetTaskList(Action<ApiResponse<GetTaskListResult>> onCompleted)
@@ -78,7 +78,7 @@ namespace SuperviseSoft.Tasks
 
       yield return CloudApiClient.Instance.GetJson<GetTaskListResult>(
         "/getTaskList",
-        response => Complete(response, onCompleted, "获取任务组列表失败"));
+        response => Complete(response, onCompleted, "获取任务列表失败"));
     }
 
     public IEnumerator GetTaskDetail(string taskId, Action<ApiResponse<GetTaskDetailResult>> onCompleted)
@@ -127,34 +127,6 @@ namespace SuperviseSoft.Tasks
         "/updateTaskStatus",
         request,
         response => Complete(response, onCompleted, "更新任务状态失败"));
-    }
-
-    public IEnumerator FinishTask(
-      string taskId,
-      int actualMinutes,
-      Action<ApiResponse<FinishTaskResult>> onCompleted)
-    {
-      if (!EnsureLoggedIn(onCompleted))
-      {
-        yield break;
-      }
-
-      if (string.IsNullOrWhiteSpace(taskId))
-      {
-        Complete(ApiResponse<FinishTaskResult>.Fail(40003, "缺少任务 ID", ApiErrorKind.BusinessError), onCompleted, "结束本任务失败");
-        yield break;
-      }
-
-      var request = new FinishTaskRequest
-      {
-        taskId = taskId,
-        actualMinutes = Mathf.Max(0, actualMinutes),
-      };
-
-      yield return CloudApiClient.Instance.PostJson<FinishTaskRequest, FinishTaskResult>(
-        "/finishTask",
-        request,
-        response => Complete(response, onCompleted, "结束本任务失败"));
     }
 
     private static bool EnsureLoggedIn<T>(Action<ApiResponse<T>> onCompleted)

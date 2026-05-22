@@ -21,7 +21,7 @@ exports.main = async (event, context) => {
       description,
       estimatedMinutes,
       actualMinutes: 0,
-      status: "running",
+      status: "created",
       createdAt: now,
       updatedAt: now,
     };
@@ -30,7 +30,7 @@ exports.main = async (event, context) => {
     task._id = result.id;
     return ok({ task });
   } catch (error) {
-    return fail(error.code || 40001, error.message || "创建本次任务失败");
+    return fail(error.code || 40001, error.message || "创建学习任务失败");
   }
 };
 

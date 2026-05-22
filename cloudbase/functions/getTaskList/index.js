@@ -18,13 +18,15 @@ exports.main = async (event, context) => {
 
     return ok({ tasks: result.data || [] });
   } catch (error) {
-    return fail(error.code || 40001, error.message || "获取任务组列表失败");
+    return fail(error.code || 40001, error.message || "获取任务列表失败");
   }
 };
 
 async function requireUserId(event, context) {
   const authorization = getHeader(event, "authorization");
-  if (!authorization || !authorization.toLowerCase().startsWith("bearer ")) throw { code: 40101, message: "请先登录" };
+  if (!authorization || !authorization.toLowerCase().startsWith("bearer ")) {
+    throw { code: 40101, message: "请先登录" };
+  }
   const profile = await callAuthApi(context, event, "/auth/v1/user/me", "GET", null, authorization);
   const userId = profile.sub || profile.user_id;
   if (!userId) throw { code: 40102, message: "登录态无效" };
@@ -44,7 +46,12 @@ async function callAuthApi(context, event, path, method, data, authorization) {
   });
   const text = await response.text();
   const json = text ? JSON.parse(text) : {};
-  if (!response.ok || json.error || json.error_code) throw { code: json.error_code || response.status || 40001, message: json.error_description || json.message || json.error || response.statusText };
+  if (!response.ok || json.error || json.error_code) {
+    throw {
+      code: json.error_code || response.status || 40001,
+      message: json.error_description || json.message || json.error || response.statusText,
+    };
+  }
   return json;
 }
 

@@ -44,7 +44,6 @@ namespace SuperviseSoft.Tasks
     public StudyTask task;
     public UploadedFileRecord[] uploadedFiles;
     public AiJob[] aiJobs;
-    public AiResult[] aiResults;
     public AiResult latestAiResult;
   }
 
@@ -60,35 +59,6 @@ namespace SuperviseSoft.Tasks
   public class UpdateTaskStatusResult
   {
     public StudyTask task;
-  }
-
-  [Serializable]
-  public class FinishTaskRequest
-  {
-    public string taskId;
-    public int actualMinutes;
-  }
-
-  [Serializable]
-  public class TaskFinishSummary
-  {
-    public string taskId;
-    public string title;
-    public int itemCount;
-    public int imageItemCount;
-    public int textItemCount;
-    public int estimatedMinutes;
-    public int aiEstimatedMinutes;
-    public int actualMinutes;
-    public string startedAt;
-    public string finishedAt;
-    public int durationMinutes;
-  }
-
-  [Serializable]
-  public class FinishTaskResult
-  {
-    public TaskFinishSummary summary;
   }
 
   public static class StudyTaskStatus

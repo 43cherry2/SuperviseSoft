@@ -26,7 +26,6 @@ exports.main = async (event, context) => {
       userId,
       taskId: task._id,
       fileId: file._id,
-      inputType: "image",
       status: "processing",
       model,
       errorMessage: "",
@@ -42,9 +41,6 @@ exports.main = async (event, context) => {
       taskId: task._id,
       fileId: file._id,
       jobId: job._id,
-      inputType: "image",
-      inputText: "",
-      fileName: file.fileName,
       summary: ai.summary,
       estimatedMinutes: ai.estimatedMinutes,
       suggestedSteps: ai.suggestedSteps,
@@ -60,17 +56,17 @@ exports.main = async (event, context) => {
       updatedAt: new Date().toISOString(),
     };
     await db.collection("ai_jobs").doc(job._id).update(successPatch);
-    await writeUsageLog(userId, "ai_analyze_image", task._id, file._id, job._id, model, ai.tokenUsage || null);
+    await writeUsageLog(userId, "ai_analyze", task._id, file._id, job._id, model, ai.tokenUsage || null);
 
     return ok({
       job: { ...job, ...successPatch },
       result: resultRecord,
     });
   } catch (error) {
-    const message = error.message || "AI 图片分析失败";
+    const message = error.message || "AI 分析失败";
     if (job && job._id) {
       await safeUpdateJobFailed(job._id, message);
-      await safeWriteUsageLog(userId, "ai_analyze_image", taskId, fileId, job._id, job.model || getProviderModel(), null);
+      await safeWriteUsageLog(userId, "ai_analyze", taskId, fileId, job._id, job.model || getProviderModel(), null);
     }
     return fail(error.code || 40001, message);
   }
@@ -85,21 +81,37 @@ async function analyzeWithProvider({ task, file, model }) {
 }
 
 function mockAnalyze(task, file, model) {
-  const estimatedMinutes = Math.max(20, Number(task.estimatedMinutes || 40));
+  const estimatedMinutes = Math.max(30, Number(task.estimatedMinutes || 40));
   return {
-    summary: `已接收作业图片 ${file.fileName}。建议先完成基础题，再集中处理计算或综合题，最后预留时间检查漏题和错题。`,
+    summary: `已读取作业图片 ${file.fileName}。建议先完成基础题，再处理计算或综合题，最后留出时间检查错题和漏题。`,
     estimatedMinutes,
     suggestedSteps: [
-      { title: "完成基础题", minutes: 10, description: "先完成低难度题目，快速建立进度。" },
-      { title: "处理重点题", minutes: Math.max(10, estimatedMinutes - 20), description: "集中处理需要草稿、推导或长时间阅读的题目。" },
-      { title: "检查订正", minutes: 10, description: "检查漏题、单位、计算过程和最终答案。" },
+      {
+        title: "完成选择题",
+        minutes: 10,
+        description: "先完成低难度题目，快速建立进度。",
+      },
+      {
+        title: "完成计算题",
+        minutes: Math.max(15, estimatedMinutes - 20),
+        description: "集中处理需要草稿纸的题目，记录关键步骤。",
+      },
+      {
+        title: "检查错题",
+        minutes: 10,
+        description: "检查漏题、单位、计算过程和最终答案。",
+      },
     ],
     rawResponse: {
       provider: "MockAiProvider",
       model,
       storagePath: file.storagePath,
     },
-    tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    tokenUsage: {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    },
   };
 }
 
@@ -115,7 +127,7 @@ async function realAnalyze(task, file, model) {
       messages: [
         {
           role: "system",
-          content: "你是学习任务规划助手。请根据作业图片信息输出 JSON：summary、estimatedMinutes、suggestedSteps。",
+          content: "你是学习任务规划助手，请根据作业图片信息输出 JSON：summary、estimatedMinutes、suggestedSteps。",
         },
         {
           role: "user",
@@ -128,10 +140,12 @@ async function realAnalyze(task, file, model) {
   const text = await response.text();
   if (!response.ok) throw { code: response.status, message: text || response.statusText };
   const json = text ? JSON.parse(text) : {};
-  const content = json.choices && json.choices[0] && json.choices[0].message ? json.choices[0].message.content : "";
+  const content = json.choices && json.choices[0] && json.choices[0].message
+    ? json.choices[0].message.content
+    : "";
   const parsed = safeParseAiJson(content);
   return {
-    summary: parsed.summary || content || "AI 已完成图片分析。",
+    summary: parsed.summary || content || "AI 已完成分析。",
     estimatedMinutes: Number(parsed.estimatedMinutes || task.estimatedMinutes || 40),
     suggestedSteps: Array.isArray(parsed.suggestedSteps) ? parsed.suggestedSteps : mockAnalyze(task, file, model).suggestedSteps,
     rawResponse: json,
@@ -151,8 +165,8 @@ function safeParseAiJson(content) {
 }
 
 function getProviderModel() {
-  if (!process.env.AI_API_KEY || !process.env.AI_API_URL) return "mock-study-image-v1";
-  return process.env.AI_MODEL || "replaceable-study-model";
+  if (!process.env.AI_API_KEY || !process.env.AI_API_URL) return "mock-homework-v1";
+  return process.env.AI_MODEL || "replaceable-homework-model";
 }
 
 async function requireOwnedTask(userId, taskId) {

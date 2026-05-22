@@ -11,17 +11,15 @@ exports.main = async (event, context) => {
     const userId = await requireUserId(event, context);
     const taskId = getQuery(event, "taskId") || readBody(event).taskId;
     const task = await requireOwnedTask(userId, taskId);
-    const uploadedFiles = await db.collection("uploaded_files").where({ userId, taskId: task._id, status: "uploaded" }).orderBy("createdAt", "desc").limit(50).get();
-    const aiJobs = await db.collection("ai_jobs").where({ userId, taskId: task._id }).orderBy("createdAt", "desc").limit(50).get();
-    const aiResults = await db.collection("ai_results").where({ userId, taskId: task._id }).orderBy("createdAt", "desc").limit(50).get();
-    const results = aiResults.data || [];
+    const uploadedFiles = await db.collection("uploaded_files").where({ userId, taskId, status: "uploaded" }).orderBy("createdAt", "desc").limit(20).get();
+    const aiJobs = await db.collection("ai_jobs").where({ userId, taskId }).orderBy("createdAt", "desc").limit(20).get();
+    const aiResults = await db.collection("ai_results").where({ userId, taskId }).orderBy("createdAt", "desc").limit(1).get();
 
     return ok({
       task,
       uploadedFiles: uploadedFiles.data || [],
       aiJobs: aiJobs.data || [],
-      aiResults: results,
-      latestAiResult: results.length > 0 ? results[0] : null,
+      latestAiResult: aiResults.data && aiResults.data.length > 0 ? aiResults.data[0] : null,
     });
   } catch (error) {
     return fail(error.code || 40001, error.message || "获取任务详情失败");

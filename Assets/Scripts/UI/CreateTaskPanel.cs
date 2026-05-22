@@ -14,7 +14,6 @@ namespace SuperviseSoft.UI
     public Button backButton;
     public Text messageText;
     public TaskListPanel taskListPanel;
-    public TaskDetailPanel taskDetailPanel;
 
     private bool _bound;
 
@@ -70,7 +69,7 @@ namespace SuperviseSoft.UI
 
       if (string.IsNullOrWhiteSpace(title))
       {
-        SetMessage("请输入本次任务名称。");
+        SetMessage("请输入任务标题。");
         return;
       }
 
@@ -81,16 +80,16 @@ namespace SuperviseSoft.UI
       }
 
       SetInteractable(false);
-      SetMessage("正在创建本次任务...");
+      SetMessage("正在创建任务...");
       StartCoroutine(StudyTaskService.Instance.CreateTask(title, description, estimatedMinutes, response =>
       {
         SetInteractable(true);
-        if (response.success && response.data?.task != null)
+        if (response.success)
         {
           EnsurePanelReferences();
-          SetMessage("本次任务已创建。");
+          SetMessage("任务创建成功。");
           Hide();
-          taskDetailPanel?.ShowAndLoad(response.data.task._id);
+          taskListPanel?.ShowAndRefresh();
           return;
         }
 
@@ -103,11 +102,6 @@ namespace SuperviseSoft.UI
       if (taskListPanel == null)
       {
         taskListPanel = Object.FindObjectOfType<TaskListPanel>(true);
-      }
-
-      if (taskDetailPanel == null)
-      {
-        taskDetailPanel = Object.FindObjectOfType<TaskDetailPanel>(true);
       }
     }
 

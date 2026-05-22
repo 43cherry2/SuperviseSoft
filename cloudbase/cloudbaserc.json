@@ -78,18 +78,8 @@
       "runtime": "Nodejs16.13"
     },
     {
-      "name": "analyzeStudyText",
-      "timeout": 60,
-      "runtime": "Nodejs16.13"
-    },
-    {
       "name": "getAiResult",
       "timeout": 10,
-      "runtime": "Nodejs16.13"
-    },
-    {
-      "name": "finishTask",
-      "timeout": 30,
       "runtime": "Nodejs16.13"
     }
   ]

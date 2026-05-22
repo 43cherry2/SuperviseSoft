@@ -84,11 +84,11 @@ function requireImageType(fileType) {
   const value = String(fileType || "").toLowerCase();
   if (value === "image/jpeg" || value === "image/jpg") return "image/jpeg";
   if (value === "image/png") return "image/png";
-  throw { code: 40004, message: "只支持 JPG/PNG 图片" };
+  throw { code: 40004, message: "第一版只支持 JPG/PNG 图片" };
 }
 
 function sanitizeFileName(fileName, fileType) {
-  const fallback = fileType === "image/png" ? "study_image.png" : "study_image.jpg";
+  const fallback = fileType === "image/png" ? "homework.png" : "homework.jpg";
   const raw = String(fileName || fallback).trim() || fallback;
   const cleaned = raw.replace(/[^\w.\-\u4e00-\u9fa5]/g, "_").replace(/_+/g, "_").slice(0, 80);
   const hasExtension = /\.(jpg|jpeg|png)$/i.test(cleaned);

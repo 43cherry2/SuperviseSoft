@@ -69,43 +69,16 @@ namespace SuperviseSoft.AI
         request,
         response =>
         {
-          onStatus?.Invoke(response.success ? response.data?.job?.status ?? AiJobStatus.Success : AiJobStatus.Failed);
-          Complete(response, onCompleted, "AI 图片分析失败");
-        });
-    }
+          if (response.success)
+          {
+            onStatus?.Invoke(response.data?.job?.status ?? AiJobStatus.Success);
+          }
+          else
+          {
+            onStatus?.Invoke(AiJobStatus.Failed);
+          }
 
-    public IEnumerator AnalyzeStudyText(
-      string taskId,
-      string text,
-      Action<string> onStatus,
-      Action<ApiResponse<AnalyzeStudyTextResult>> onCompleted)
-    {
-      if (!EnsureLoggedIn(onCompleted))
-      {
-        yield break;
-      }
-
-      if (string.IsNullOrWhiteSpace(text))
-      {
-        Complete(ApiResponse<AnalyzeStudyTextResult>.Fail(40003, "请输入要分析的文字", ApiErrorKind.BusinessError), onCompleted, "AI 文字分析失败");
-        yield break;
-      }
-
-      onStatus?.Invoke(AiJobStatus.Pending);
-      var request = new AnalyzeStudyTextRequest
-      {
-        taskId = taskId,
-        text = text.Trim(),
-      };
-
-      onStatus?.Invoke(AiJobStatus.Processing);
-      yield return CloudApiClient.Instance.PostJson<AnalyzeStudyTextRequest, AnalyzeStudyTextResult>(
-        "/analyzeStudyText",
-        request,
-        response =>
-        {
-          onStatus?.Invoke(response.success ? response.data?.job?.status ?? AiJobStatus.Success : AiJobStatus.Failed);
-          Complete(response, onCompleted, "AI 文字分析失败");
+          Complete(response, onCompleted, "AI 分析失败");
         });
     }
 

@@ -42,7 +42,6 @@ namespace SuperviseSoft.Tasks
     public event Action<ApiResponse<GetTaskDetailResult>> TaskDetailLoaded;
     public event Action<ApiResponse<CreateTaskResult>> TaskCreated;
     public event Action<ApiResponse<UpdateTaskStatusResult>> TaskStatusUpdated;
-    public event Action<ApiResponse<FinishTaskResult>> TaskFinished;
 
     private void Awake()
     {
@@ -104,22 +103,6 @@ namespace SuperviseSoft.Tasks
         }
 
         TaskStatusUpdated?.Invoke(response);
-      }));
-    }
-
-    public void FinishTask(string taskId, int actualMinutes)
-    {
-      StartCoroutine(StudyTaskService.Instance.FinishTask(taskId, actualMinutes, response =>
-      {
-        if (response.success)
-        {
-          CurrentTask = null;
-          CurrentFile = null;
-          CurrentAiJob = null;
-          CurrentAiResult = null;
-        }
-
-        TaskFinished?.Invoke(response);
       }));
     }
 

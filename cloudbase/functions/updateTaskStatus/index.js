@@ -5,7 +5,7 @@ const app = cloudbase.init({
   env: process.env.CLOUDBASE_ENV_ID || process.env.TCB_ENV || cloudbase.SYMBOL_CURRENT_ENV,
 });
 const db = app.database();
-const ALLOWED_STATUS = new Set(["created", "running", "paused", "cancelled"]);
+const ALLOWED_STATUS = new Set(["created", "running", "paused", "finished", "cancelled"]);
 
 exports.main = async (event, context) => {
   try {
@@ -13,13 +13,14 @@ exports.main = async (event, context) => {
     const body = readBody(event);
     const task = await requireOwnedTask(userId, body.taskId);
     const status = String(body.status || "").trim();
-    if (!ALLOWED_STATUS.has(status)) throw { code: 40004, message: "任务状态不正确；结束任务请调用 finishTask" };
+    if (!ALLOWED_STATUS.has(status)) throw { code: 40004, message: "任务状态不正确" };
 
     const patch = {
       status,
       actualMinutes: Math.max(0, Math.floor(Number(body.actualMinutes || task.actualMinutes || 0))),
       updatedAt: new Date().toISOString(),
     };
+
     await db.collection("study_tasks").doc(task._id).update(patch);
     return ok({ task: { ...task, ...patch } });
   } catch (error) {

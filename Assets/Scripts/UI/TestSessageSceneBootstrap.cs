@@ -2,7 +2,6 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
-using SuperviseSoft.Upload;
 
 namespace SuperviseSoft.UI
 {
@@ -116,7 +115,6 @@ namespace SuperviseSoft.UI
       taskListPanel.mainEntryPanel = mainPanel;
 
       createTaskPanel.taskListPanel = taskListPanel;
-      createTaskPanel.taskDetailPanel = taskDetailPanel;
 
       taskDetailPanel.taskListPanel = taskListPanel;
       taskDetailPanel.aiResultPanel = aiResultPanel;
@@ -259,38 +257,20 @@ namespace SuperviseSoft.UI
       var panel = CreateWideCard("TaskDetailPanel", parent);
       var script = panel.gameObject.AddComponent<TaskDetailPanel>();
       script.root = panel.gameObject;
-      AddHeader(panel.transform, font, "本次任务");
+      AddHeader(panel.transform, font, "任务详情");
       script.titleText = CreateTextAt(panel.transform, font, "TaskTitleText", "", 0, 0, TextAnchor.MiddleLeft);
       script.descriptionText = CreateTextAt(panel.transform, font, "TaskDescriptionText", "", 1, 0, TextAnchor.MiddleLeft);
       script.statusText = CreateTextAt(panel.transform, font, "TaskStatusText", "", 2, 0, TextAnchor.MiddleLeft);
-      script.textInput = CreateInput("StudyTextInput", panel.transform, font, "输入文字任务，点击分析文字", 3);
-      script.actualMinutesInput = CreateInput("ActualMinutesInput", panel.transform, font, "结束时填写实际分钟数", 4);
-
-      var dropZoneImage = CreateImage("ImageDropZone", panel.transform, new Color(0.18f, 0.21f, 0.24f, 1f));
-      Stretch(dropZoneImage.rectTransform, Vector2.zero, Vector2.one, new Vector2(28f, 12f), new Vector2(-390f, -510f));
-      var dropZone = dropZoneImage.gameObject.AddComponent<ImageDropZone>();
-      var dropText = CreateText("DropZoneText", dropZoneImage.transform, font, "拖拽 JPG/PNG 到这里\n或打开相机拍照", 15, TextAnchor.MiddleCenter, new Color(0.9f, 0.94f, 0.96f, 1f));
-      Stretch(dropText.rectTransform, Vector2.zero, Vector2.one, Vector2.zero, Vector2.zero);
-      dropZone.hintText = dropText;
-      script.imageDropZone = dropZone;
-      script.dropZoneText = dropText;
-
-      script.imagePreview = CreateRawImage("ImagePreview", panel.transform, new Color(0.08f, 0.09f, 0.1f, 1f));
-      Stretch(script.imagePreview.rectTransform, Vector2.zero, Vector2.one, new Vector2(360f, 12f), new Vector2(-28f, -510f));
-
-      script.currentItemText = CreateText("CurrentItemText", panel.transform, font, "暂无分析项", 15, TextAnchor.UpperLeft, new Color(0.9f, 0.94f, 0.96f, 1f));
-      Stretch(script.currentItemText.rectTransform, Vector2.zero, Vector2.one, new Vector2(28f, 150f), new Vector2(-28f, -300f));
-      script.currentItemText.horizontalOverflow = HorizontalWrapMode.Wrap;
-      script.currentItemText.verticalOverflow = VerticalWrapMode.Overflow;
-
-      script.analyzeTextButton = CreateButton("AnalyzeTextButton", panel.transform, font, "分析文字", 5, 0);
-      script.startCameraButton = CreateButton("StartCameraButton", panel.transform, font, "打开相机", 5, 1);
-      script.capturePhotoButton = CreateButton("CapturePhotoButton", panel.transform, font, "拍照并分析", 6, 0);
-      script.refreshButton = CreateButton("RefreshDetailButton", panel.transform, font, "刷新", 6, 1);
-      script.previousItemButton = CreateButton("PreviousItemButton", panel.transform, font, "上一项", 7, 0);
-      script.nextItemButton = CreateButton("NextItemButton", panel.transform, font, "下一项", 7, 1);
-      script.finishTaskButton = CreateButton("FinishTaskButton", panel.transform, font, "结束本任务", 8, 0);
-      script.backListButton = CreateButton("BackListButton", panel.transform, font, "返回列表", 8, 1);
+      script.fileText = CreateTextAt(panel.transform, font, "TaskFileText", "", 3, 0, TextAnchor.MiddleLeft);
+      script.actualMinutesInput = CreateInput("ActualMinutesInput", panel.transform, font, "实际分钟数", 4);
+      script.imagePathInput = CreateInput("ImagePathInput", panel.transform, font, "本地图片绝对路径 JPG/PNG", 5);
+      script.runningButton = CreateButton("RunningButton", panel.transform, font, "开始", 6, 0);
+      script.pausedButton = CreateButton("PausedButton", panel.transform, font, "暂停", 6, 1);
+      script.finishedButton = CreateButton("FinishedButton", panel.transform, font, "完成", 7, 0);
+      script.uploadButton = CreateButton("UploadButton", panel.transform, font, "上传图片", 7, 1);
+      script.analyzeButton = CreateButton("AnalyzeButton", panel.transform, font, "AI 分析", 8, 0);
+      script.refreshButton = CreateButton("RefreshDetailButton", panel.transform, font, "刷新详情", 8, 1);
+      script.backListButton = CreateButton("BackListButton", panel.transform, font, "返回列表", 9, 0);
       script.messageText = CreateMessageText("TaskDetailMessage", panel.transform, font);
       return script;
     }
@@ -419,14 +399,6 @@ namespace SuperviseSoft.UI
     private static Image CreateImage(string name, Transform parent, Color color)
     {
       var image = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image)).GetComponent<Image>();
-      image.transform.SetParent(parent, false);
-      image.color = color;
-      return image;
-    }
-
-    private static RawImage CreateRawImage(string name, Transform parent, Color color)
-    {
-      var image = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(RawImage)).GetComponent<RawImage>();
       image.transform.SetParent(parent, false);
       image.color = color;
       return image;
